@@ -226,6 +226,22 @@ class TestBaseProcessorConfigExtraction(CustomTestCase):
         self.assertEqual(proc.mm_processor_worker_num, 1)
         self.assertIsNone(proc.mm_processor_executor)
 
+    def test_cpu_preprocess_device_takes_the_cpu_path(self):
+        """SGLANG_MM_PREPROCESS_DEVICE=cpu runs the fast image processor on the
+        CPU, so it does not contend with the scheduler's device even on a CUDA
+        host, and the CPU path's two workers apply."""
+        from transformers import BaseImageProcessor
+
+        with (
+            patch.dict(os.environ, {"SGLANG_MM_PREPROCESS_DEVICE": "cpu"}),
+            self._patch_platform(cuda_alike=True, device_type="cuda"),
+        ):
+            proc = self._make_processor(
+                {}, image_processor=MagicMock(spec=BaseImageProcessor)
+            )
+        self.assertEqual(proc.mm_processor_worker_num, 2)
+        self.assertIsNotNone(proc.mm_processor_executor)
+
     def test_non_accelerator_fast_processor_gets_two_workers(self):
         from transformers import BaseImageProcessor
 
