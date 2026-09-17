@@ -82,6 +82,14 @@ class Qwen3CoderDetector(BaseFormatDetector):
         # Initialize attributes that were missing in the original PR
         self.current_func_name: Optional[str] = None
 
+        # Incremental parameter streaming (vendored PR #21829, adapted).
+        # A long string value is emitted in pieces as it arrives instead of
+        # being withheld until </parameter>, so a tool call that authors a file
+        # does not land as one giant delta after seconds of dead air.
+        self._streaming_param_active: bool = False
+        self._streaming_param_emitted: int = 0
+        self._streaming_param_leading_checked: bool = False
+
         # Hold the wrapper until its name is validated. Rejected examples must
         # survive as literal text, including markup received in earlier chunks.
         self._pending_tool_prefix: Optional[str] = None
@@ -214,6 +222,67 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     f"Parsed value '{param_value}' of parameter '{param_name}' cannot be converted via Python `ast.literal_eval()` in tool '{func_name}', degenerating to string."
                 )
             return param_value
+
+    def _should_stream_param(self, param_name: str, tools: Optional[List[Tool]]) -> bool:
+        """Whether this parameter's value may be emitted incrementally.
+
+        Streaming is opt-in and deliberately narrow:
+
+        * The tool must publish a `properties` map and declare this parameter.
+          Upstream PR #21829 streams UNDECLARED parameters too ("treat as
+          string"), which is wrong here in two ways. It would stream the stray
+          `arguments` envelope this model emits -- and once `"arguments": "` is
+          on the wire, _unwrap_arguments_envelope can never repair it, because
+          the streaming path cannot retract what it has already sent. It would
+          also stream a parameter whose type we have no way to check.
+        * The declared type must be string-like. JSON encoding of numbers,
+          booleans, objects and arrays is not prefix-stable under
+          re-serialization, so only strings can be cut into pieces safely.
+
+        Anything else buffers to completion and takes the existing path.
+        """
+        properties = self._get_declared_properties(self.current_func_name, tools)
+        if not properties or param_name not in properties:
+            return False
+        return self._get_param_type(properties[param_name]) in (
+            "string",
+            "str",
+            "text",
+            "varchar",
+            "char",
+            "enum",
+        )
+
+    def _find_safe_emit_end(self, text: str) -> int:
+        """Rightmost position that can be emitted without splitting a tag.
+
+        A chunk boundary can land inside `</parameter>`, and emitting the
+        partial `</par` would put literal markup into the argument value. Stop
+        at the last `<` whenever what follows it is a prefix of any tag we care
+        about, and wait for the rest.
+        """
+        if not text:
+            return 0
+        last_angle = text.rfind("<")
+        if last_angle == -1:
+            return len(text)
+        suffix = text[last_angle:]
+        for tag in (
+            self.parameter_end_token,
+            self.parameter_prefix,
+            self.function_end_token,
+            self.tool_call_start_token,
+            self.tool_call_end_token,
+            self.tool_call_prefix,
+        ):
+            if tag.startswith(suffix):
+                return last_angle
+        return len(text)
+
+    def _reset_streaming_param(self) -> None:
+        self._streaming_param_active = False
+        self._streaming_param_emitted = 0
+        self._streaming_param_leading_checked = False
 
     def _get_declared_properties(
         self, func_name: str, tools: Optional[List[Tool]]
@@ -547,6 +616,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     self.current_tool_name_sent = True
                     self.current_tool_param_count = 0
                     self.json_started = False
+                    self._reset_streaming_param()
                     self.current_func_name = func_name
 
                     calls.append(
@@ -599,6 +669,36 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         best_cand = min(candidates, key=lambda x: x[0])
                         end_pos = best_cand[0]
                         end_token_len = best_cand[1]
+
+                        if self._streaming_param_active:
+                            # This parameter was already going out in pieces:
+                            # emit whatever is left and close the JSON string.
+                            # The key and the opening quote are long gone, so
+                            # there is nothing to reconsider here.
+                            remaining = rest_of_slice[
+                                self._streaming_param_emitted : end_pos
+                            ]
+                            if remaining.endswith("\n"):
+                                remaining = remaining[:-1]
+                            if remaining:
+                                calls.append(
+                                    ToolCallItem(
+                                        tool_index=self.current_tool_id,
+                                        parameters=json.dumps(
+                                            remaining, ensure_ascii=False
+                                        )[1:-1],
+                                    )
+                                )
+                            calls.append(
+                                ToolCallItem(
+                                    tool_index=self.current_tool_id,
+                                    parameters='"',
+                                )
+                            )
+                            self.current_tool_param_count += 1
+                            self._reset_streaming_param()
+                            self.parsed_pos += value_start_idx + end_pos + end_token_len
+                            continue
 
                         param_name = current_slice[
                             len(self.parameter_prefix) : name_end
@@ -665,6 +765,61 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         total_len = (name_end + 1) + end_pos + end_token_len
                         self.parsed_pos += total_len
                         continue
+
+                    # No terminator yet. If this parameter is eligible, start
+                    # (or continue) emitting its value incrementally instead of
+                    # sitting on it until </parameter> arrives.
+                    param_name = current_slice[len(self.parameter_prefix) : name_end]
+                    if not self._streaming_param_active:
+                        if not self._should_stream_param(param_name, tools):
+                            break
+                        self._streaming_param_active = True
+                        self._streaming_param_emitted = 0
+                        self._streaming_param_leading_checked = False
+                        if not self.json_started:
+                            calls.append(
+                                ToolCallItem(
+                                    tool_index=self.current_tool_id, parameters="{"
+                                )
+                            )
+                            self.json_started = True
+                        key_prefix = f'{json.dumps(param_name)}: "'
+                        if self.current_tool_param_count > 0:
+                            key_prefix = f", {key_prefix}"
+                        calls.append(
+                            ToolCallItem(
+                                tool_index=self.current_tool_id, parameters=key_prefix
+                            )
+                        )
+
+                    new_content = rest_of_slice[self._streaming_param_emitted :]
+                    if not self._streaming_param_leading_checked and new_content:
+                        # The template puts a newline after the opening tag.
+                        if new_content[0] == "\n":
+                            new_content = new_content[1:]
+                            self._streaming_param_emitted += 1
+                        self._streaming_param_leading_checked = True
+                    if new_content:
+                        safe_end = self._find_safe_emit_end(new_content)
+                        # Hold back a trailing newline: it may be the format's
+                        # own separator before </parameter>, which the buffered
+                        # path strips. If it turns out to be real content, the
+                        # next increment emits it.
+                        if safe_end > 0 and new_content[safe_end - 1] == "\n":
+                            safe_end -= 1
+                        if safe_end > 0:
+                            escaped = json.dumps(
+                                new_content[:safe_end], ensure_ascii=False
+                            )[1:-1]
+                            if escaped:
+                                calls.append(
+                                    ToolCallItem(
+                                        tool_index=self.current_tool_id,
+                                        parameters=escaped,
+                                    )
+                                )
+                            self._streaming_param_emitted += safe_end
+                    break
 
                 # Incomplete parameter tag or value
                 break
