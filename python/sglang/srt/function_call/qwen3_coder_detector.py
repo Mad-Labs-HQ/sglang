@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import re
 from typing import Any, List, Optional
 
@@ -17,6 +18,28 @@ from sglang.srt.function_call.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _reject_non_rfc_constant(literal: str):
+    raise ValueError(f"non-RFC-8259 literal: {literal}")
+
+
+def _reject_non_finite_number(literal: str) -> float:
+    number = float(literal)
+    if not math.isfinite(number):
+        # float("1e400") is inf, and json.dumps would then write a bare
+        # `Infinity` that no RFC-8259 parser accepts.
+        raise ValueError(f"non-finite number: {literal}")
+    return number
+
+
+# Python's json accepts NaN/Infinity and happily writes them back out; nothing
+# else does. Anything we re-serialize has to survive a strict client, so parse
+# envelope payloads with a decoder that refuses them.
+_STRICT_JSON = json.JSONDecoder(
+    parse_constant=_reject_non_rfc_constant,
+    parse_float=_reject_non_finite_number,
+)
 
 
 class Qwen3CoderDetector(BaseFormatDetector):
@@ -192,6 +215,81 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 )
             return param_value
 
+    def _get_declared_properties(
+        self, func_name: str, tools: Optional[List[Tool]]
+    ) -> Optional[dict]:
+        """Return the tool's declared `properties` map, or None if it has none.
+
+        Unlike _get_arguments_config this never falls back to the schema object
+        itself. A schema that routes through $ref/$defs publishes no property
+        map here, and treating the schema as one would make `type`, `required`
+        and `$ref` look like argument names.
+        """
+        if not tools:
+            return None
+        for tool in tools:
+            try:
+                if tool.type != "function" or tool.function.name != func_name:
+                    continue
+                params = tool.function.parameters
+            except AttributeError:
+                continue
+            if isinstance(params, dict):
+                properties = params.get("properties")
+                if isinstance(properties, dict):
+                    return properties
+            return None
+        return None
+
+    def _unwrap_arguments_envelope(
+        self, raw_value: str, func_name: str, tools: Optional[List[Tool]]
+    ) -> Optional[dict]:
+        """Unwrap a call whose real arguments arrived inside a bogus `arguments`
+        parameter.
+
+        Qwen3.8-Flash-Next drifts back to its native JSON tool-call payload while
+        still emitting the XML envelope, producing
+
+            <function=script><parameter=arguments>{"body": "..."}</parameter>
+
+        instead of <parameter=body>.... The call then reaches the client as
+        {"arguments": "{\\"body\\": ...}"} and any strict client rejects it with
+        `missing field body`. Measured at 353 calls in one agent session
+        (2026-09-14), i.e. the majority of that session's tool calls.
+
+        Unwrap only when the evidence is unambiguous: the tool publishes a
+        `properties` map, does not itself declare `arguments`, and the value is
+        a JSON object whose keys are ALL declared. Anything else returns None
+        and keeps today's behaviour.
+
+        Values are passed through as-is: the model already typed them in JSON,
+        and re-running _convert_param_value would, among other things, turn the
+        literal string "null" into None.
+        """
+        properties = self._get_declared_properties(func_name, tools)
+        if not properties or "arguments" in properties:
+            return None
+        try:
+            payload = _STRICT_JSON.decode(raw_value)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if not all(key in properties for key in payload):
+            return None
+        # WARNING, not INFO: the rate of this is the only visible measure of the
+        # model losing tool-call format, and it climbed from 1.4% to 40% of
+        # requests over four hours on 2026-09-14. Repairing it silently would
+        # retire the signal along with the symptom.
+        logger.warning(
+            "Unwrapped a stray `arguments` envelope for tool '%s' "
+            "(%d bytes, keys: %s).",
+            func_name,
+            len(raw_value),
+            ", ".join(sorted(payload)) or "<none>",
+        )
+        return payload
+
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """One-shot parsing for non-streaming scenarios."""
         if self.tool_call_start_token not in text:
@@ -256,6 +354,20 @@ class Qwen3CoderDetector(BaseFormatDetector):
                             p_val = p_val[1:]
                         if p_val.endswith("\n"):
                             p_val = p_val[:-1]
+
+                        if p_name == "arguments":
+                            envelope = self._unwrap_arguments_envelope(
+                                p_val, func_name, tools
+                            )
+                            if envelope is not None:
+                                # Splice the envelope's keys in where
+                                # `arguments` stood, so a real parameter of the
+                                # same name still wins -- which is what the
+                                # streaming path produces, since it emits each
+                                # parameter as it closes and a later duplicate
+                                # key overrides an earlier one.
+                                parsed_params.update(envelope)
+                                continue
 
                         parsed_params[p_name] = self._convert_param_value(
                             p_val, p_name, param_config, func_name
@@ -508,18 +620,36 @@ class Qwen3CoderDetector(BaseFormatDetector):
                             )
                             self.json_started = True
 
-                        param_config = self._get_arguments_config(
-                            self.current_func_name, tools
-                        )
-                        converted_val = self._convert_param_value(
-                            raw_value, param_name, param_config, self.current_func_name
-                        )
+                        # A stray <parameter=arguments> envelope has to be
+                        # unwrapped here, not at the end: the fragment is
+                        # emitted as soon as the parameter closes and is never
+                        # revisited.
+                        emitted = None
+                        if param_name == "arguments":
+                            emitted = self._unwrap_arguments_envelope(
+                                raw_value, self.current_func_name, tools
+                            )
+                        if emitted is None:
+                            param_config = self._get_arguments_config(
+                                self.current_func_name, tools
+                            )
+                            emitted = {
+                                param_name: self._convert_param_value(
+                                    raw_value,
+                                    param_name,
+                                    param_config,
+                                    self.current_func_name,
+                                )
+                            }
 
                         # Construct JSON fragment: "key": value
                         # Note: We must be careful with json.dumps to ensure valid JSON streaming
-                        json_key_val = f"{json.dumps(param_name)}: {json.dumps(converted_val, ensure_ascii=False)}"
+                        json_key_val = ", ".join(
+                            f"{json.dumps(key)}: {json.dumps(value, ensure_ascii=False)}"
+                            for key, value in emitted.items()
+                        )
 
-                        if self.current_tool_param_count > 0:
+                        if self.current_tool_param_count > 0 and json_key_val:
                             fragment = f", {json_key_val}"
                         else:
                             fragment = json_key_val
@@ -529,7 +659,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                                 tool_index=self.current_tool_id, parameters=fragment
                             )
                         )
-                        self.current_tool_param_count += 1
+                        self.current_tool_param_count += len(emitted)
 
                         # Advance cursor
                         total_len = (name_end + 1) + end_pos + end_token_len
