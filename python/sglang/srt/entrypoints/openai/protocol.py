@@ -396,6 +396,9 @@ class CompletionRequest(BaseModel):
     extra_key: Optional[Union[List[str], str]] = None
     # Cache salt for request caching
     cache_salt: Optional[Union[List[str], str]] = None
+    # Do not publish this request's KV to the prefix cache. Prefix matching
+    # still applies; only insertion is suppressed. For one-shot scoring traffic.
+    skip_cache_insert: bool = False
     # Priority for the request
     priority: Optional[int] = None
 
@@ -932,6 +935,9 @@ class ChatCompletionRequest(BaseModel):
     extra_key: Optional[Union[List[str], str]] = None
     # Cache salt for request caching
     cache_salt: Optional[Union[List[str], str]] = None
+    # Do not publish this request's KV to the prefix cache. Prefix matching
+    # still applies; only insertion is suppressed. For one-shot scoring traffic.
+    skip_cache_insert: bool = False
     # Priority for the request
     priority: Optional[int] = None
 

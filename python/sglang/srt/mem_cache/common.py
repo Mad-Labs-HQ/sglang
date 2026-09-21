@@ -110,6 +110,17 @@ def maybe_cache_unfinished_req(req: Req, tree_cache: BasePrefixCache, **kwargs):
     if getattr(req, "skip_radix_cache_insert", False):
         return
 
+    # A request that opted out of publication still needs the chunked-prefill
+    # bookkeeping: cache_unfinished_req is what extends req.prefix_indices, and
+    # the scheduler drives the next chunk off
+    #   chunked_req.extend_range.end > len(chunked_req.prefix_indices)
+    # (scheduler.py). Skip that and a multi-chunk prompt re-prefills the same
+    # chunk forever. Publication for those interior chunks is the price; the
+    # final whole-sequence node -- the one worth caching, and the only one a
+    # future request could match end to end -- is still withheld at finish.
+    if getattr(req, "skip_cache_insert", False) and not kwargs.get("chunked", False):
+        return
+
     tree_cache.cache_unfinished_req(req, **kwargs)
 
 
@@ -218,7 +229,11 @@ def release_kv_cache(req: Req, tree_cache: BasePrefixCache, is_insert: bool = Tr
     effective_kv_committed_len = req.effective_kv_committed_len()
     tree_cache.cache_finished_req(
         req,
-        is_insert=is_insert and not getattr(req, "skip_radix_cache_insert", False),
+        is_insert=(
+            is_insert
+            and not getattr(req, "skip_radix_cache_insert", False)
+            and not getattr(req, "skip_cache_insert", False)
+        ),
         kv_len_to_handle=effective_kv_committed_len,
     )
 

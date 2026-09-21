@@ -340,6 +340,21 @@ class GenerateReqInput:
     # Cache namespace used to isolate otherwise-identical prefixes.
     cache_salt: Optional[Union[List[str], str]] = None
 
+    # Do not publish this request's KV to the prefix cache.
+    #
+    # Prefix *matching* is unaffected: the request still reads whatever is
+    # already cached, it just never inserts its own tokens into the radix tree
+    # -- and so never reaches the HiCache host or storage tiers either, since
+    # backup is driven by write-through of newly inserted nodes.
+    #
+    # Intended for one-shot scoring traffic: logprob probes whose prompts will
+    # never be seen again. Publishing those is pure loss -- they evict live
+    # conversational prefixes and amplify L3 writes for a node nothing will
+    # ever match.
+    #
+    # Batch-level scalar: it applies to every request in the batch.
+    skip_cache_insert: bool = False
+
     def regenerate_rid(self):
         """Generate a new request ID and return it."""
         if isinstance(self.rid, list):
@@ -925,6 +940,7 @@ class GenerateReqInput:
             priority=self.priority,
             extra_key=self.extra_key[i] if self.extra_key is not None else None,
             cache_salt=(self.cache_salt[i] if self.cache_salt is not None else None),
+            skip_cache_insert=self.skip_cache_insert,
             no_logs=self.no_logs,
             custom_labels=self.custom_labels,
             return_bytes=self.return_bytes,
@@ -1040,6 +1056,9 @@ class TokenizedGenerateReqInput(BaseReq, kw_only=True):
 
     # Cache namespace used to isolate otherwise-identical prefixes.
     cache_salt: Optional[str] = None
+
+    # Do not publish this request's KV to the prefix cache. See GenerateReqInput.
+    skip_cache_insert: bool = False
 
     def wrap_pickle_fields(self):
         self.time_stats = wrap_as_pickle(self.time_stats)
