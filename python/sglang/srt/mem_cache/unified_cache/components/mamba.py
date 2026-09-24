@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, Callable, Optional, Sequence
 
@@ -55,6 +56,11 @@ if TYPE_CHECKING:
         UnifiedRadixCache,
         UnifiedTreeNode,
     )
+
+logger = logging.getLogger(__name__)
+
+# Chunk-boundary checkpoints skipped because the mamba pool had no slot to donate.
+_stash_donation_skips = 0
 
 
 class MambaComponent(TreeComponent):
@@ -518,14 +524,44 @@ class MambaComponent(TreeComponent):
         if cd.lock_ref == 0:
             self.tree_core._update_evictable_leaf_sets(node)
 
-    def _alloc_mamba_slot(self) -> torch.Tensor:
-        """Allocate one mamba pool slot, evicting if necessary."""
+    def _try_alloc_mamba_slot(self) -> Optional[torch.Tensor]:
+        """Allocate one mamba pool slot, evicting if necessary. None when every
+        remaining slot is owned by a running request or locked in the tree."""
         slot = self.cache.req_to_token_pool.mamba_allocator.alloc(1)
         if slot is None:
             self.cache.evict_for_alloc(EvictParams(num_tokens=0, mamba_num=1))
             slot = self.cache.req_to_token_pool.mamba_allocator.alloc(1)
-            assert slot is not None, "Can not alloc mamba cache"
         return slot
+
+    def _alloc_mamba_slot(self) -> torch.Tensor:
+        """Allocate one mamba pool slot, evicting if necessary."""
+        slot = self._try_alloc_mamba_slot()
+        assert slot is not None, "Can not alloc mamba cache"
+        return slot
+
+    def _skip_unfinished_donation(self, req: Req) -> int:
+        """Leave this chunk out of the prefix cache when no slot can be donated.
+
+        The pool can be transiently full at a chunk-boundary stash: the donate
+        slot is allocated before the request's previous lock is released
+        (running * S + 1), and a write-through backup chain locks the mamba state
+        of every un-backed chunk node on its path until the D2H ack. A checkpoint
+        is only a prefix-cache optimization, so skip it instead of failing the
+        scheduler. The tracked state stays in the request's own ping-pong slot;
+        returning 0 takes the same path as a chunk without a track boundary.
+        """
+        global _stash_donation_skips
+        _stash_donation_skips += 1
+        if _stash_donation_skips == 1 or _stash_donation_skips % 100 == 0:
+            logger.warning(
+                "Mamba pool exhausted at a chunk-boundary stash (rid=%s); skipping "
+                "this chunk's prefix-cache checkpoint (%d skips so far). Raise "
+                "--max-mamba-cache-size or set --mamba-max-states-per-path if "
+                "this keeps happening.",
+                getattr(req, "rid", None),
+                _stash_donation_skips,
+            )
+        return 0
 
     @property
     def int8_ckpt_pool(self):
@@ -601,7 +637,9 @@ class MambaComponent(TreeComponent):
             # Donate the mamba index to the radix cache instead of copying.
             if self.int8_ckpt_pool is not None:
                 if self.cache.enable_mamba_extra_buffer:
-                    new_slot = self._alloc_mamba_slot()
+                    new_slot = self._try_alloc_mamba_slot()
+                    if new_slot is None:
+                        return self._skip_unfinished_donation(req)
                     src_active = (
                         self.cache.req_to_token_pool.donate_mamba_ping_pong_slot(
                             req, new_slot
@@ -614,14 +652,18 @@ class MambaComponent(TreeComponent):
                         req.kv.mamba_pool_idx.view(-1)
                     )
             elif self.cache.enable_mamba_extra_buffer:
-                new_slot = self._alloc_mamba_slot()
+                new_slot = self._try_alloc_mamba_slot()
+                if new_slot is None:
+                    return self._skip_unfinished_donation(req)
                 mamba_value_donated = (
                     self.cache.req_to_token_pool.donate_mamba_ping_pong_slot(
                         req, new_slot
                     )
                 )
             else:
-                mamba_value_donated = self._alloc_mamba_slot()
+                mamba_value_donated = self._try_alloc_mamba_slot()
+                if mamba_value_donated is None:
+                    return self._skip_unfinished_donation(req)
                 # mamba_pool is a pure PHYSICAL store; translate both slot ids
                 # virtual->physical (identity for the non-unified memory pool) first.
                 translate = self.cache.req_to_token_pool.translate_mamba_indices
