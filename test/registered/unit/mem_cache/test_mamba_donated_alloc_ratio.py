@@ -8,6 +8,9 @@ donated slot. With N distinct-prefix requests that peak is N own + N locked +
 the donated alloc asserts; ratio 3 (pool = 3N) has headroom. Once decode's
 skip_mamba leaves the matched prefix evictable, even ratio 2 recovers via
 eviction -- which is why the peak, not the decode steady state, sets the floor.
+
+The chunk-boundary stash itself no longer fails at that peak: with no slot to
+donate it skips the checkpoint and the request keeps its tracked state.
 """
 
 import unittest
@@ -240,6 +243,86 @@ class TestMambaDonatedAllocRatio(unittest.TestCase):
         self.assertEqual(
             cache.alloc_evict_params, [EvictParams(num_tokens=0, mamba_num=1)]
         )
+
+
+class TestChunkedStashOnExhaustedPool(unittest.TestCase):
+    """prepare_for_caching_req(is_finished=False) is the chunk-boundary stash. On
+    a pool with no free or evictable slot it must skip the checkpoint (return 0,
+    donate nothing, leak nothing) instead of asserting in the scheduler."""
+
+    TRACK_SEQLEN = 4096
+
+    @staticmethod
+    def _donate(req, new_slot):
+        # Mirrors HybridReqToTokenPool.donate_mamba_ping_pong_slot.
+        keep = req.mamba_last_track_idx
+        donated = req.mamba_ping_pong_track_buffer[keep].unsqueeze(-1).clone()
+        req.mamba_ping_pong_track_buffer[keep] = new_slot[0]
+        return donated
+
+    def _extra_buffer_peak(self, pool_size: int):
+        component, cache, owned = _build_peak(pool_size, lock_prefixes=True)
+        cache.enable_mamba_extra_buffer = True
+        cache.req_to_token_pool.donate_mamba_ping_pong_slot = self._donate
+        req = SimpleNamespace(
+            rid="chunked",
+            mamba_pool_idx=owned[0][0],
+            mamba_ping_pong_track_buffer=torch.cat([owned[1], owned[2]]),
+            mamba_last_track_idx=0,
+            mamba_last_track_seqlen=self.TRACK_SEQLEN,
+        )
+        return component, cache, req
+
+    def test_extra_buffer_stash_skips_when_pool_exhausted(self):
+        component, cache, req = self._extra_buffer_peak(pool_size=2 * N)
+        buffer_before = req.mamba_ping_pong_track_buffer.clone()
+        insert_params = SimpleNamespace(mamba_value=None)
+
+        cache_len = component.prepare_for_caching_req(
+            req, insert_params, token_ids_len=2 * self.TRACK_SEQLEN, is_finished=False
+        )
+
+        self.assertEqual(cache_len, 0)
+        self.assertIsNone(insert_params.mamba_value)
+        self.assertTrue(torch.equal(req.mamba_ping_pong_track_buffer, buffer_before))
+        self.assertEqual(cache.allocator.free_ids, [])
+        self.assertEqual(
+            cache.alloc_evict_params, [EvictParams(num_tokens=0, mamba_num=1)]
+        )
+
+        component.cleanup_after_caching_req(
+            req, is_finished=False, insert_params=insert_params
+        )
+        self.assertIsNone(req.mamba_last_track_seqlen)
+        self.assertEqual(cache.allocator.free_ids, [])
+
+    def test_extra_buffer_stash_donates_with_headroom(self):
+        component, cache, req = self._extra_buffer_peak(pool_size=3 * N)
+        tracked = req.mamba_ping_pong_track_buffer[0].item()
+        insert_params = SimpleNamespace(mamba_value=None)
+
+        cache_len = component.prepare_for_caching_req(
+            req, insert_params, token_ids_len=2 * self.TRACK_SEQLEN, is_finished=False
+        )
+
+        self.assertEqual(cache_len, self.TRACK_SEQLEN)
+        self.assertEqual(insert_params.mamba_value.tolist(), [tracked])
+        self.assertNotEqual(req.mamba_ping_pong_track_buffer[0].item(), tracked)
+        self.assertEqual(cache.alloc_evict_params, [])
+
+    def test_no_buffer_stash_skips_when_pool_exhausted(self):
+        component, cache, owned = _build_peak(pool_size=2 * N, lock_prefixes=True)
+        cache.enable_mamba_extra_buffer = False
+        req = SimpleNamespace(rid="chunked", mamba_pool_idx=owned[0][0])
+        insert_params = SimpleNamespace(mamba_value=None)
+
+        cache_len = component.prepare_for_caching_req(
+            req, insert_params, token_ids_len=self.TRACK_SEQLEN, is_finished=False
+        )
+
+        self.assertEqual(cache_len, 0)
+        self.assertIsNone(insert_params.mamba_value)
+        self.assertEqual(cache.allocator.free_ids, [])
 
 
 class TestPPMambaPoolSizing(unittest.TestCase):
