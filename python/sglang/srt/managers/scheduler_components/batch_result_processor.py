@@ -82,6 +82,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _as_list(value):
+    """Convert a tensor to a list, and pass an already-converted value through.
+
+    These logprob fields are NOT reliably tensors by the time they reach the
+    scheduler. managers/utils.py already converts them with
+    `_async_d2h(v) if torch.is_tensor(v) else v`, so under the pipelined /
+    spec-decode path the elements arrive as plain Python lists -- and a bare
+    `.tolist()` then dies with
+
+        AttributeError: 'list' object has no attribute 'tolist'
+
+    taking the whole server down via SIGQUIT (observed 2026-09-21 07:11, after
+    21h uptime, on a request asking for logprobs). The same function already
+    guards `next_token_ids` this way; these call sites were simply missed.
+    """
+    return value.tolist() if torch.is_tensor(value) else value
+
+
 def _get_speculative_output_stride(result: GenerationBatchResult) -> int:
     """Return the padded per-request width in flattened speculative output."""
     stride = result.speculative_output_stride
@@ -521,23 +539,23 @@ class SchedulerBatchResultProcessor:
         if batch.return_logprob:
             logits_output.finalize_input_logprobs()
             if logits_output.next_token_logprobs is not None:
-                logits_output.next_token_logprobs = (
-                    logits_output.next_token_logprobs.tolist()
+                logits_output.next_token_logprobs = _as_list(
+                    logits_output.next_token_logprobs
                 )
             if logits_output.input_token_logprobs is not None:
                 logits_output.input_token_logprobs = tuple(
-                    logits_output.input_token_logprobs.tolist()
+                    _as_list(logits_output.input_token_logprobs)
                 )
             if logits_output.next_token_top_logprobs_val:
                 logits_output.next_token_top_logprobs_val = [
-                    v.tolist() for v in logits_output.next_token_top_logprobs_val
+                    _as_list(v) for v in logits_output.next_token_top_logprobs_val
                 ]
                 logits_output.next_token_top_logprobs_idx = [
-                    x.tolist() for x in logits_output.next_token_top_logprobs_idx
+                    _as_list(x) for x in logits_output.next_token_top_logprobs_idx
                 ]
             if logits_output.next_token_token_ids_logprobs_val:
                 logits_output.next_token_token_ids_logprobs_val = [
-                    v.tolist() for v in logits_output.next_token_token_ids_logprobs_val
+                    _as_list(v) for v in logits_output.next_token_token_ids_logprobs_val
                 ]
 
     def _apply_prefill_logprobs(
@@ -1100,18 +1118,18 @@ class SchedulerBatchResultProcessor:
             next_token_ids = [[t] for t in ids]
 
         if batch.return_logprob:
-            next_token_logprobs = logits_output.next_token_logprobs.tolist()
+            next_token_logprobs = _as_list(logits_output.next_token_logprobs)
             if logits_output.next_token_top_logprobs_val:
                 logits_output.next_token_top_logprobs_val = [
-                    v.tolist() for v in logits_output.next_token_top_logprobs_val
+                    _as_list(v) for v in logits_output.next_token_top_logprobs_val
                 ]
                 logits_output.next_token_top_logprobs_idx = [
-                    x.tolist() for x in logits_output.next_token_top_logprobs_idx
+                    _as_list(x) for x in logits_output.next_token_top_logprobs_idx
                 ]
 
             if logits_output.next_token_token_ids_logprobs_val:
                 logits_output.next_token_token_ids_logprobs_val = [
-                    v.tolist() for v in logits_output.next_token_token_ids_logprobs_val
+                    _as_list(v) for v in logits_output.next_token_token_ids_logprobs_val
                 ]
         return next_token_ids, next_token_logprobs
 
