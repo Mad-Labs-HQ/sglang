@@ -24,12 +24,12 @@ from collections import OrderedDict
 from typing import Dict, List, NamedTuple, Optional, Sequence
 
 from sglang.srt.entrypoints.systemone.calibration import (
-    BUILTIN_MAX_CHOICE_ROTATIONS,
+    BUILTIN_MAX_CHOICE_ORDERS,
     apply_calibration,
+    choice_orders,
     combine_reads,
     log_normalize,
     read_log_probabilities,
-    rotation_offsets,
 )
 from sglang.srt.entrypoints.systemone.calibration_fit import (
     auroc,
@@ -138,7 +138,13 @@ def selected_reads(answer, kind: str, reads: Reads) -> List[dict]:
     all_reads = answer["x_reads"]
     if kind == "choice":
         names = all_reads[0]["order"]
-        offsets = set(rotation_offsets(len(names), reads.n))
+        n, k = len(names), min(len(names), reads.n)
+        collected = {tuple(names.index(x) for x in r["order"]): r for r in all_reads}
+        wanted = choice_orders("rotations", n, k)
+        if all(order in collected for order in wanted):
+            return [collected[order] for order in wanted]
+        # Collected before the most discordant selection: evenly spaced rotations.
+        offsets = {i * n // k for i in range(k)}
         return [r for r in all_reads if names.index(r["order"][0]) in offsets]
     return all_reads[: reads.n]
 
@@ -355,12 +361,13 @@ def label_free_config(chosen: Dict[str, object]) -> dict:
         raise ValueError("the server reads no content-free or batch priors")
     return {
         "default_reads": {
-            "choice_rotations": chosen["choice_rotations"],
+            "choice_orders": "rotations",
+            "choice_max_orders": chosen["choice_rotations"],
             "choice_name_variants": chosen["choice_name_variants"],
             "noul_orders": chosen["noul_orders"],
             "noul_case_variants": chosen["noul_case_variants"],
         },
-        "max_choice_rotations": BUILTIN_MAX_CHOICE_ROTATIONS,
+        "max_choice_orders": BUILTIN_MAX_CHOICE_ORDERS,
     }
 
 

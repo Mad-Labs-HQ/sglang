@@ -1338,13 +1338,14 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
     def _label_free(self, manager=None, **setup):
         """A server whose default reads are label-free."""
         fields = dict(
-            choice_rotations=3,
+            choice_orders="rotations",
+            choice_max_orders=3,
             choice_name_variants=True,
             noul_orders=2,
             noul_case_variants=True,
         )
         fields.update(setup)
-        config = ReadsConfig(default_reads=ReadSetup(**fields), max_choice_rotations=4)
+        config = ReadsConfig(default_reads=ReadSetup(**fields), max_choice_orders=4)
         return self._serving(manager, reads_config=config)
 
     async def test_label_free_answers_combine_their_reads(self):
@@ -1422,19 +1423,36 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bodies[0], bodies[1])
         manager = ScoringManager(self.tokenizer)
         request = _systemone_request(
-            questions, x_read_setup={**raw, "choice_rotations": 2}
+            questions,
+            x_read_setup={
+                **raw,
+                "choice_orders": "williams",
+                "choice_max_orders": "all",
+            },
         )
         response = await self._serving(manager).handle_request(request, None)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(manager.requests[0].input_ids), 2)
-        over = _systemone_request(
-            questions, x_read_setup={**raw, "choice_rotations": 5}
-        )
-        response = await self._label_free().handle_request(over, None)
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("allows at most 4", json.loads(response.body)["message"])
+        self.assertEqual(len(manager.requests[0].input_ids), 3)
+        # The cap is on the orders a question gets: a max above the option count
+        # reads each option count once, and only larger questions are refused.
+        many = {"q": {"type": "choice", "criteria": {f"o{i}": None for i in range(6)}}}
+        for qs, max_orders, status in (
+            (questions, 20, 200),
+            (many, "all", 400),
+            (many, 4, 200),
+        ):
+            with self.subTest(options=len(qs["q"]["criteria"]), max_orders=max_orders):
+                request = _systemone_request(
+                    qs, x_read_setup={**raw, "choice_max_orders": max_orders}
+                )
+                response = await self._label_free().handle_request(request, None)
+                self.assertEqual(response.status_code, status)
+                if status == 400:
+                    message = json.loads(response.body)["message"]
+                    self.assertIn("in 6 orders", message)
+                    self.assertIn("allows at most 4", message)
         with self.assertRaises(ValidationError):
-            _systemone_request(questions, x_read_setup={"choice_rotations": 2})
+            _systemone_request(questions, x_read_setup={"choice_max_orders": 2})
 
     async def test_client_calibrations_apply_after_the_reads(self):
         calibrations = {
@@ -1522,17 +1540,18 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
             )
 
         label_free = dict(
-            choice_rotations=3,
+            choice_orders="rotations",
+            choice_max_orders=3,
             choice_name_variants=True,
             noul_orders=2,
             noul_case_variants=True,
         )
-        # Choice rotations are not part of a noul question's reads, so its
+        # Choice orders are not part of a noul question's reads, so its
         # calibration still applies; the choice question's does not.
         for qid, question, status in (("n", noul, 200), ("c", choice, 400)):
             with self.subTest(qid):
                 request = calibrated(
-                    qid, question, {**label_free, "choice_rotations": 2}
+                    qid, question, {**label_free, "choice_max_orders": 2}
                 )
                 response = await self._label_free().handle_request(request, None)
                 self.assertEqual(response.status_code, status)
@@ -1540,9 +1559,13 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
                     message = json.loads(response.body)["message"]
                     self.assertIn(f"question 'c'", message)
                     self.assertIn(fingerprints["c"], message)
-        request = calibrated("c", choice, label_free)
-        response = await self._label_free().handle_request(request, None)
-        self.assertEqual(response.status_code, 200)
+        # "all" reads these 3 options exactly as a max of 3 does.
+        for max_orders in (3, "all"):
+            request = calibrated(
+                "c", choice, {**label_free, "choice_max_orders": max_orders}
+            )
+            response = await self._label_free().handle_request(request, None)
+            self.assertEqual(response.status_code, 200)
 
     async def test_a_long_shared_prefix_is_prefilled_once_first(self):
         questions = {

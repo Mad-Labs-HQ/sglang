@@ -12,6 +12,7 @@ from pydantic import (
     ConfigDict,
     Field,
     NonNegativeInt,
+    PositiveInt,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -165,7 +166,9 @@ class SystemOneReadSetup(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    choice_rotations: int = Field(ge=1)
+    choice_orders: Literal["rotations", "williams"]
+    # A number of orders, or "all" for one per option.
+    choice_max_orders: Union[PositiveInt, Literal["all"]]
     choice_name_variants: bool
     noul_orders: int = Field(ge=1, le=2)
     noul_case_variants: bool
