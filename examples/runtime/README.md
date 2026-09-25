@@ -14,6 +14,7 @@ The below examples will mostly need you to start a server in a separate terminal
 * `reward_model.py`: An example how to extract scores from a reward model.
 * `vertex_predict.py`: An example how to deploy a model to [Vertex AI](https://cloud.google.com/vertex-ai?hl=en).
 * `chain_of_verification.py`: An example of [Chain-of-Verification (CoVe)](https://arxiv.org/abs/2309.11495) to reduce hallucinations. The model drafts an answer, then verifies it in a **fresh, isolated session** (no shared KV-cache) to avoid self-confirmation bias, and refines if needed.
+* `systemone/label_free.json`: A calibration config for `/v1/systemone`, the System One compatible decision route, that answers yes or no questions from both orders and every case of the labels without labeled data. Launch with `--decision-calibration-config`; see [Decision models](https://docs.sglang.io/docs/supported-models/decision_models#calibration).
 ## Engine
 
 The `engine` folder contains that examples that show how to use [Offline Engine API](https://docs.sglang.io/basic_usage/offline_engine_api.html#Offline-Engine-API) for common workflows.
