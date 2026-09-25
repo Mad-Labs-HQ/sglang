@@ -7,6 +7,7 @@ import string
 import unittest
 from types import SimpleNamespace
 
+import msgspec
 import torch
 from pydantic import ValidationError
 from transformers import AddedToken, AutoTokenizer
@@ -21,9 +22,11 @@ from sglang.srt.entrypoints.openai.serving_decisions import (
     render_question,
 )
 from sglang.srt.entrypoints.systemone.calibration import (
-    BatchPriorOff,
-    CalibrationConfig,
-    LabelFreeConfig,
+    BUILTIN_READS_CONFIG,
+    RAW_READS,
+    ReadsConfig,
+    ReadSetup,
+    apply_calibration,
     combine_reads,
     read_log_probabilities,
 )
@@ -93,7 +96,7 @@ def _handler(
     reasoning_parser=None,
     lossy=False,
     serving_class=OpenAIServingDecisions,
-    calibration=None,
+    reads_config=BUILTIN_READS_CONFIG,
 ):
     """Build the handler over the chat serving state the server builds at startup."""
     template = manager.tokenizer.chat_template
@@ -120,7 +123,12 @@ def _handler(
         reasoning_parser=reasoning_parser,
     )
     if serving_class is SystemOneServing:
-        return serving_class(chat_serving, calibration=calibration)
+        return serving_class(
+            chat_serving,
+            reads_config=reads_config,
+            model="served-model",
+            model_revision=None,
+        )
     return serving_class(chat_serving)
 
 
@@ -1011,9 +1019,16 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
             body["usage"], {"input_tokens": prompt_tokens, "output_tokens": 0}
         )
 
+        extensions = {
+            "x_label_mass",
+            "x_read_probabilities",
+            "x_calibration",
+            "x_fingerprint",
+        }
         urgent = body["answers"]["urgent"]
-        self.assertEqual(set(urgent), {"type", "noul", "x_label_mass", "x_calibration"})
-        self.assertEqual(urgent["x_calibration"], "raw")
+        self.assertEqual(set(urgent), {"type", "noul", *extensions})
+        self.assertEqual(urgent["x_calibration"], "none")
+        self.assertEqual(urgent["x_read_probabilities"]["yes"], urgent["noul"])
         yes_no = manager.logprobs[self.tokenizer.convert_tokens_to_ids(["yes", "no"])]
         torch.testing.assert_close(
             torch.tensor(urgent["noul"], dtype=torch.float64),
@@ -1022,15 +1037,7 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
 
         team = body["answers"]["team"]
         self.assertEqual(
-            set(team),
-            {
-                "type",
-                "choice",
-                "confidence",
-                "probabilities",
-                "x_label_mass",
-                "x_calibration",
-            },
+            set(team), {"type", "choice", "confidence", "probabilities", *extensions}
         )
         self.assertEqual(list(team["probabilities"]), ["billing", "technical", "sales"])
         self.assertEqual(
@@ -1043,15 +1050,7 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
         mood = body["answers"]["mood"]
         self.assertEqual(
             set(mood),
-            {
-                "type",
-                "score",
-                "confidence",
-                "legend",
-                "probabilities",
-                "x_label_mass",
-                "x_calibration",
-            },
+            {"type", "score", "confidence", "legend", "probabilities", *extensions},
         )
         self.assertEqual(mood["legend"], {"0": "Calm", "1": "Civil", "2": legend_level})
         self.assertEqual(list(mood["probabilities"]), ["0", "1", "2"])
@@ -1134,9 +1133,11 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
             question_id: _answer(
                 view=_view(question),
                 probabilities=[0.3] * (2 if question_id == "urgent" else 3),
+                read_probabilities=[0.3] * (2 if question_id == "urgent" else 3),
                 mass=0.9,
                 question_id=question_id,
-                applied="raw",
+                applied="none",
+                fingerprint="f",
                 reads=None,
             )
             for question_id, question in questions.items()
@@ -1334,21 +1335,17 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(manager.requests, [])
 
-    def _calibrated(self, manager=None, **label_free):
+    def _label_free(self, manager=None, **setup):
+        """A server whose default reads are label-free."""
         fields = dict(
             choice_rotations=3,
             choice_name_variants=True,
             noul_orders=2,
             noul_case_variants=True,
-            batch_prior=BatchPriorOff(),
         )
-        fields.update(label_free)
-        config = CalibrationConfig(
-            default_mode="label_free",
-            label_free=LabelFreeConfig(**fields),
-            fitted=None,
-        )
-        return self._serving(manager, calibration=config)
+        fields.update(setup)
+        config = ReadsConfig(default_reads=ReadSetup(**fields), max_choice_rotations=4)
+        return self._serving(manager, reads_config=config)
 
     async def test_label_free_answers_combine_their_reads(self):
         manager = ScoringManager(self.tokenizer)
@@ -1363,7 +1360,7 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
             },
             x_return_reads=True,
         )
-        response = await self._calibrated(manager).handle_request(request, None)
+        response = await self._label_free(manager).handle_request(request, None)
         self.assertEqual(response.status_code, 200)
         # Two noul orders, three rotations, one score read, in one scoring call.
         self.assertEqual(len(manager.requests), 1)
@@ -1371,7 +1368,7 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
         answers = json.loads(response.body)["answers"]
         for question_id, answer in answers.items():
             with self.subTest(question_id):
-                self.assertEqual(answer["x_calibration"], "label_free")
+                self.assertEqual(answer["x_calibration"], "none")
                 names = answer["x_reads"][0]["order"]
                 log_q = combine_reads(
                     [
@@ -1380,12 +1377,14 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
                     ]
                 )
                 expected = [math.exp(v) for v in log_q]
-                if question_id == "urgent":
-                    self.assertAlmostEqual(answer["noul"], expected[0])
-                else:
-                    self.assertEqual(list(answer["probabilities"]), names)
-                    for got, want in zip(answer["probabilities"].values(), expected):
-                        self.assertAlmostEqual(got, want)
+                served = (
+                    [answer["noul"]]
+                    if question_id == "urgent"
+                    else list(answer["probabilities"].values())
+                )
+                for got, want in zip(served, expected):
+                    self.assertAlmostEqual(got, want)
+                self.assertEqual(list(answer["x_read_probabilities"]), names)
         urgent, team = answers["urgent"]["x_reads"], answers["team"]["x_reads"]
         self.assertEqual([r["order"] for r in urgent], [["yes", "no"], ["no", "yes"]])
         self.assertEqual(urgent[0]["texts"]["yes"], ["yes", "Yes", "YES"])
@@ -1404,31 +1403,146 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Answer with no or yes only.", prompts[1])
         self.assertIn("Answer with yes or no only.", prompts[0])
 
-    async def test_raw_requests_are_unchanged_by_a_calibration_config(self):
-        request = _systemone_request(
-            {"q": {"type": "choice", "criteria": {"a": None, "b": None}}},
-            x_calibration="raw",
-        )
+    async def test_requests_choose_their_reads_within_the_cap(self):
+        questions = {
+            "q": {"type": "choice", "criteria": {"a": None, "b": None, "c": None}}
+        }
+        raw = msgspec.structs.asdict(RAW_READS)
+        # Raw reads on a label-free server answer exactly as a server without config.
         bodies = []
-        for serving in (self._serving(), self._calibrated()):
-            response = await serving.handle_request(request, None)
+        for serving, extra in (
+            (self._serving(), {}),
+            (self._label_free(), {"x_read_setup": raw}),
+        ):
+            response = await serving.handle_request(
+                _systemone_request(questions, **extra), None
+            )
             self.assertEqual(response.status_code, 200)
             bodies.append(json.loads(response.body))
         self.assertEqual(bodies[0], bodies[1])
-
-    async def test_calibration_modes_need_a_config(self):
-        question = {"q": {"type": "noul", "instructions": "x"}}
-        for serving, mode, message in (
-            (self._serving(), "label_free", "--decision-calibration-config"),
-            (self._calibrated(), "fitted", "needs fitted profiles"),
-        ):
-            with self.subTest(mode):
-                request = _systemone_request(question, x_calibration=mode)
-                response = await serving.handle_request(request, None)
-                self.assertEqual(response.status_code, 400)
-                self.assertIn(message, json.loads(response.body)["message"])
+        manager = ScoringManager(self.tokenizer)
+        request = _systemone_request(
+            questions, x_read_setup={**raw, "choice_rotations": 2}
+        )
+        response = await self._serving(manager).handle_request(request, None)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(manager.requests[0].input_ids), 2)
+        over = _systemone_request(
+            questions, x_read_setup={**raw, "choice_rotations": 5}
+        )
+        response = await self._label_free().handle_request(over, None)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("allows at most 4", json.loads(response.body)["message"])
         with self.assertRaises(ValidationError):
-            _systemone_request(question, x_calibration="calibrated")
+            _systemone_request(questions, x_read_setup={"choice_rotations": 2})
+
+    async def test_client_calibrations_apply_after_the_reads(self):
+        calibrations = {
+            "urgent": {"type": "platt", "a": 0.5, "b": -0.3},
+            "team": {
+                "type": "vector",
+                "scale": [1.2, 0.8, 1.0],
+                "bias": [0.1, 0, -0.4],
+            },
+            "mood": {"type": "temperature", "temperature": 2.5},
+        }
+        questions = {
+            "urgent": {"type": "noul", "instructions": "Needs an answer today"},
+            "team": {"type": "choice", "criteria": {"a": None, "b": None, "c": None}},
+            "mood": {"type": "score", "criteria": ["Calm", "Civil", "Angry"]},
+        }
+        for question_id, calibration in calibrations.items():
+            questions[question_id]["x_calibration"] = calibration
+        response = await self._label_free().handle_request(
+            _systemone_request(questions), None
+        )
+        self.assertEqual(response.status_code, 200)
+        answers = json.loads(response.body)["answers"]
+        for question_id, calibration in calibrations.items():
+            with self.subTest(question_id):
+                answer = answers[question_id]
+                self.assertEqual(answer["x_calibration"], calibration["type"])
+                log_q = [math.log(p) for p in answer["x_read_probabilities"].values()]
+                expected = [math.exp(v) for v in apply_calibration(calibration, log_q)]
+                served = (
+                    [answer["noul"]]
+                    if question_id == "urgent"
+                    else list(answer["probabilities"].values())
+                )
+                for got, want in zip(served, expected):
+                    self.assertAlmostEqual(got, want, places=9)
+
+    def test_calibrations_must_fit_their_question(self):
+        cases = {
+            "platt on a choice": (
+                {"type": "choice", "criteria": {"a": None, "b": None}},
+                {"type": "platt", "a": 1, "b": 0},
+            ),
+            "vector on a noul": (
+                {"type": "noul", "instructions": "x"},
+                {"type": "vector", "scale": [1, 1], "bias": [0, 0]},
+            ),
+            "vector of the wrong length": (
+                {"type": "score", "criteria": ["low", "mid", "high"]},
+                {"type": "vector", "scale": [1, 1], "bias": [0, 0]},
+            ),
+            "unknown calibration": (
+                {"type": "noul", "instructions": "x"},
+                {"type": "isotonic"},
+            ),
+            "non-positive temperature": (
+                {"type": "noul", "instructions": "x"},
+                {"type": "temperature", "temperature": 0},
+            ),
+        }
+        for name, (question, calibration) in cases.items():
+            with self.subTest(name), self.assertRaises(ValidationError):
+                _systemone_request({"q": {**question, "x_calibration": calibration}})
+
+    async def test_calibrations_fitted_on_other_answers_are_refused(self):
+        noul = {"type": "noul", "instructions": "x"}
+        choice = {"type": "choice", "criteria": {"a": None, "b": None, "c": None}}
+        response = await self._label_free().handle_request(
+            _systemone_request({"n": noul, "c": choice}), None
+        )
+        fingerprints = {
+            qid: answer["x_fingerprint"]
+            for qid, answer in json.loads(response.body)["answers"].items()
+        }
+
+        def calibrated(qid, question, setup):
+            calibration = {
+                "type": "temperature",
+                "temperature": 1.5,
+                "fitted_on": fingerprints[qid],
+            }
+            return _systemone_request(
+                {qid: {**question, "x_calibration": calibration}},
+                x_read_setup=setup,
+            )
+
+        label_free = dict(
+            choice_rotations=3,
+            choice_name_variants=True,
+            noul_orders=2,
+            noul_case_variants=True,
+        )
+        # Choice rotations are not part of a noul question's reads, so its
+        # calibration still applies; the choice question's does not.
+        for qid, question, status in (("n", noul, 200), ("c", choice, 400)):
+            with self.subTest(qid):
+                request = calibrated(
+                    qid, question, {**label_free, "choice_rotations": 2}
+                )
+                response = await self._label_free().handle_request(request, None)
+                self.assertEqual(response.status_code, status)
+                if status == 400:
+                    message = json.loads(response.body)["message"]
+                    self.assertIn(f"question 'c'", message)
+                    self.assertIn(fingerprints["c"], message)
+        request = calibrated("c", choice, label_free)
+        response = await self._label_free().handle_request(request, None)
+        self.assertEqual(response.status_code, 200)
 
     async def test_a_long_shared_prefix_is_prefilled_once_first(self):
         questions = {

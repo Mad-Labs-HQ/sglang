@@ -217,12 +217,12 @@ What to expect from this route:
 
 - Any `model` name is accepted, including the SDK default `jev-latest`, unless it names a LoRA adapter after a colon, as in `base:adapter`. The response `model` is always the served model.
 - A `noul` answer is the probability of yes. A `choice` answer has the most probable option and a `score` answer the probability-weighted mean level, each with `probabilities` and `confidence`, and a score answer echoes its levels in `legend`.
-- `confidence` follows the formulas TypeSafe publishes for its adapter. It is a statistic of the returned probabilities, which are renormalized over the answer labels and ignore probability outside them. It can read 0 for a score split between distant levels, and thresholds tuned on another provider may not transfer. Raw answers are not calibrated, see [Calibration](#calibration) for the modes that correct them.
-- Each answer also carries `x_label_mass`, the full-vocabulary probability of the tokens scored for its options in the read that shows them in request order, which `/v1/decisions` returns as `label_mass` for its labels, and `x_calibration`, the [calibration](#calibration) mode applied. With `x_return_reads`, it also carries `x_reads`. The Python SDK drops fields it does not define, so read them from `result.raw_http_response.json()`.
+- `confidence` follows the formulas TypeSafe publishes for its adapter. It is a statistic of the returned probabilities, which are renormalized over the answer labels and ignore probability outside them. It can read 0 for a score split between distant levels, and thresholds tuned on another provider may not transfer. Answers are not calibrated unless the request sends a calibration, see [Calibration](#calibration).
+- Each answer also carries `x_label_mass`, the full-vocabulary probability of the tokens scored for its options in the read that shows them in request order, which `/v1/decisions` returns as `label_mass` for its labels, and the [calibration](#calibration) fields `x_read_probabilities`, `x_calibration`, and `x_fingerprint`. With `x_return_reads`, it also carries `x_reads`. The Python SDK drops fields it does not define, so read them from `result.raw_http_response.json()`.
 - A choice takes 1 to 255 options and a score 1 to 10 levels. Option names that are blank, contain control or line break characters, or repeat another name after trimming and case folding are refused, and so are blank or null levels, as on `/v1/decisions`.
 - Beyond 26 options, every option gets a two-letter label (`AA`, `AB`, and so on) checked to be one token for the served tokenizer. These labels include common words and have unequal priors, so answers above 26 options can depend on option order. More than 26 options also need a Hugging Face tokenizer that reports its added tokens, and a chat template with an added token between the message and the answer position whose following text tokenizes the same on its own, as the Qwen models do with `</think>`. Without them, a choice is limited to 26 options.
 - `instructions` are optional. A choice or score question without them drops its question line, and a `noul` question is answered from its `true` and `false` descriptions. A `noul` question with neither, such as the SDK's bare `Noul()`, is refused.
-- Unknown top-level fields are ignored. Unknown keys inside a question or inside `noul` criteria are refused, and so are the `/v1/decisions` fields `temperature`, `prompt_format_version`, and `return_prompt_token_ids` with any value other than null. `chat_template_kwargs`, `x_calibration`, and `x_return_reads` are accepted as SGLang extensions.
+- Unknown top-level fields are ignored. Unknown keys inside a question or inside `noul` criteria are refused, and so are the `/v1/decisions` fields `temperature`, `prompt_format_version`, and `return_prompt_token_ids` with any value other than null. `chat_template_kwargs`, `x_read_setup`, and `x_return_reads` on the request and `x_calibration` on a question are accepted as SGLang extensions.
 - Unlike `/v1/decisions`, an empty `state` and empty or blank question ids are accepted, as the System One schema allows.
 - Invalid requests return 422 with the location of the error, other refusals return 400, and neither is retried by the SDKs.
 - `usage.input_tokens` counts the prompt of every read, so the state is counted once per read of every question, and `usage.output_tokens` is 0. A prefix shared by all reads of a request is prefilled once when it is at least `SGLANG_DECISION_PREFIX_PRIME_MIN_TOKENS` tokens (256 by default), so the state is computed once however many questions ask about it.
@@ -231,65 +231,94 @@ What to expect from this route:
 
 ## Calibration
 
-The probabilities of a chat model's answer labels are not calibrated: an answer given 0.9 is not right 90% of the time. Models trained after instruction tuning tend to be overconfident, their label choices shift with the order options are shown in and with the letters they carry, and many put most of their probability on a spelling of the label the prompt did not ask for, such as `Yes` for `yes`. `/v1/systemone` can correct for this in three modes, chosen per request with the `x_calibration` extension or by default from the server's `--decision-calibration-config`:
+The probabilities of a chat model's answer labels are not calibrated: an answer given 0.9 is not right 90% of the time. Models trained after instruction tuning tend to be overconfident, their label choices shift with the order options are shown in and with the letters they carry, and many put most of their probability on a spelling of the label the prompt did not ask for, such as `Yes` for `yes`. `/v1/systemone` corrects for this in two steps, both chosen by the client: how each question is read, and a calibration the client fitted for the question on its own labeled data. The server keeps no calibration state.
 
-| Mode | Needs | Answers |
-| --- | --- | --- |
-| `raw` | nothing, the default without a config | One read per question, exactly as `/v1/decisions` reports it |
-| `label_free` | a config | Several reads per question, combined without any labeled data |
-| `fitted` | a config with fitted profiles | The reads of its base mode, then a temperature (choice and score) or Platt scaling (noul) fitted on your labeled rows |
+### Reads
 
-A read is one prompt of a question. `label_free` makes these reads:
+A read is one prompt of a question. `x_read_setup` on the request chooses them:
 
-- **noul in both orders** (`noul_orders: 2`): once asking for yes or no, once for no or yes, averaged in log space, which cancels a preference for the first answer offered.
-- **noul case variants** (`noul_case_variants`): `Yes`, `YES`, `No`, and `NO` count for their answer where each is one distinct token, which recovers the probability a model puts on spellings the prompt did not ask for.
-- **choice rotations** (`choice_rotations: k`): the options shown in `k` evenly spaced cyclic orders with the letters kept in place, combined by geometric mean, which averages out a preference for particular letters.
-- **choice name variants** (`choice_name_variants`): the first token of an option's name also counts for it, when no other option or label has that token.
-- **batch prior** (`batch_prior`): a running mean of each question's answers, divided out at a strength once `min_count` answers are seen, as in Batch Calibration. It is kept per question and per server process, so answers depend on the traffic before them, and it hurts questions whose true answers are skewed.
-
-Score levels are ordinal and always shown in order. The config file lists every setting, and a missing or unknown field is refused at startup:
-
-```json Config
-{
-  "default_mode": "label_free",
-  "label_free": {
-    "choice_rotations": 1,
-    "choice_name_variants": false,
-    "noul_orders": 2,
-    "noul_case_variants": true,
-    "batch_prior": {"type": "off"}
-  },
-  "fitted": null
+```json Request
+"x_read_setup": {
+  "choice_rotations": 4,
+  "choice_name_variants": false,
+  "noul_orders": 2,
+  "noul_case_variants": true
 }
 ```
 
-This is `examples/runtime/systemone/label_free.json`, the components that lowered the mean calibration error on the benchmark below without costing any task more than a point of accuracy. To fit profiles, launch with it, write your labeled rows as System One request bodies with a `labels` map (an option name, a level index, or `true` or `false` per question id), and run:
+- `noul_orders: 2` asks each yes or no question twice, once for yes or no and once for no or yes, which cancels a preference for the first answer offered.
+- `noul_case_variants` counts `Yes`, `YES`, `No`, and `NO` for their answer where each is one distinct token.
+- `choice_rotations: k` shows the options in `k` evenly spaced cyclic orders with the letters kept in place, which averages out a preference for particular letters.
+- `choice_name_variants` counts the first token of an option's name for it, when no other option or label has that token.
+
+Score levels are ordinal and always read once, in order. The reads of a question are combined by geometric mean. A request without `x_read_setup`, such as one from a System One SDK, gets the server's default reads, set with `--decision-reads-config`; without that flag every question gets the single read of `/v1/decisions`. The config lists every field and caps the rotations a request may ask for:
+
+```json Config
+{
+  "default_reads": {
+    "choice_rotations": 1,
+    "choice_name_variants": false,
+    "noul_orders": 2,
+    "noul_case_variants": true
+  },
+  "max_choice_rotations": 8
+}
+```
+
+This is `examples/runtime/systemone/reads.json`: the reads that lowered the mean calibration error of K2-Horizon-3.7B on the benchmark below without costing any task more than a point of accuracy. Without the flag, requests may ask for up to 8 rotations.
+
+### Calibrations
+
+Each question can carry an `x_calibration`, applied to the log probabilities of its combined reads:
+
+| `type` | Question types | Fields | Effect |
+| --- | --- | --- | --- |
+| `temperature` | all | `temperature` | Divides every log probability |
+| `platt` | noul | `a`, `b` | P(yes) = sigmoid(a * (log P(yes) - log P(no)) + b) |
+| `vector` | choice, score | `scale`, `bias`, one per option | Scales and shifts each option's log probability (diagonal Dirichlet calibration), which also corrects a bias toward particular options |
+
+```json Request
+"questions": {
+  "urgent": {
+    "type": "noul",
+    "instructions": "The customer needs an answer today.",
+    "x_calibration": {"type": "platt", "a": 3.14, "b": 1.28, "fitted_on": "c1af44e59041d84e"}
+  }
+}
+```
+
+Every answer carries `x_read_probabilities`, its option probabilities before any calibration, and `x_fingerprint`, which identifies the model, the prompt wording, and the parts of the read setup that apply to the question. A calibration may send the fingerprint of the answers it was fitted on as `fitted_on`; the server then refuses it once the model or those reads change, instead of calibrating with it. Rotations change the fingerprint of choice questions only, and yes or no orders and case variants that of noul questions only.
+
+Fit calibrations from labeled rows written as System One request bodies with a `labels` map (an option name, a level index, or `true` or `false` per question id), where a question id always names the same question:
 
 ```bash Command
 python -m sglang.srt.entrypoints.systemone.fit_calibration --url http://127.0.0.1:30000 \
-  --config label_free.json --base label_free --data labeled.jsonl \
-  --min-rows 50 --folds 5 --out fitted.json
+  --data labeled.jsonl --read-setup reads.json \
+  --min-rows 50 --folds 5 --concurrency 8 --out calibrations.json
 ```
 
-The tool fits one profile per question with at least `--min-rows` rows, one per question type and option count, and one per type, and keeps a profile only when it lowers the out-of-fold NLL. A question uses its most specific profile, and answers with no profile report the base mode in `x_calibration`. Relaunch with `--decision-calibration-config fitted.json`. The file records the model, revision, prompt format version, and reads it was fitted on, and a server with any of them different refuses it at startup.
+The tool runs on the client: it asks the server each row with the read setup (the server's default reads when `--read-setup` is absent), fits the candidates for each question id with at least `--min-rows` labeled answers (temperature and Platt scaling for noul, temperature and vector scaling for choice and score), and keeps the one with the lowest out-of-fold NLL, or none when leaving the answers as they are does better. `calibrations.json` maps question ids to calibrations stamped with `fitted_on`. Send each as its question's `x_calibration`, with the same `x_read_setup`.
 
-Each answer reports the mode applied in `x_calibration`. With `x_return_reads: true`, `x_reads` lists every read with its option order, labels, and the full-vocabulary logprobs of the tokens counted for each option, from which the answer can be recomputed with `sglang.srt.entrypoints.systemone.calibration`.
+Each answer reports the calibration applied in `x_calibration` (`none` without one). With `x_return_reads: true`, `x_reads` lists every read with its option order, labels, and the full-vocabulary logprobs of the tokens counted for each option, from which the answer can be recomputed with `sglang.srt.entrypoints.systemone.calibration`.
 
-On `IFM/K2-Horizon-3.7B`, over eight public tasks with 300 test rows each, mean accuracy and expected calibration error (ECE) per question type as served. `raw` comes from the collection run and the other modes from their own runs, which differ from it only by the drift described below (see `benchmark/systemone/README.md` for every number):
+### Measured
 
-| Task type | `raw` accuracy / ECE | `label_free` | `fitted` on 300 rows per task |
+On `IFM/K2-Horizon-3.7B`, over eight public tasks with 300 test rows each, mean accuracy and expected calibration error (ECE) per question type as served. The default reads are those of `reads.json`; calibrations were fitted by the tool on 300 other rows per task. `raw` comes from the collection run and the others from their own runs, which differ from it only by the drift described below (see `benchmark/systemone/README.md` for every number):
+
+| Task type | Single read, accuracy / ECE | Default reads | Default reads, calibrated |
 | --- | --- | --- | --- |
-| noul (BoolQ, SST-2, AG News sports) | 0.703 / 0.231 | 0.861 / 0.148 | 0.874 / 0.068 |
-| choice (AG News, emotion, Banking77) | 0.650 / 0.114 | 0.649 / 0.116 | 0.649 / 0.075 |
-| score (SST-5, Yelp) | 0.275 / 0.220 | 0.268 / 0.223 | 0.264 / 0.040 |
+| noul (BoolQ, SST-2, AG News sports) | 0.703 / 0.231 | 0.866 / 0.147 | 0.874 / 0.056 |
+| choice (AG News, emotion, Banking77) | 0.650 / 0.114 | 0.648 / 0.118 | 0.680 / 0.057 |
+| score (SST-5, Yelp) | 0.275 / 0.220 | 0.267 / 0.230 | 0.303 / 0.060 |
 
 What to keep in mind:
 
-- Only fitted profiles make probabilities trustworthy for thresholds, and only for the kind of question they were fitted on: fitted temperatures differ between tasks, and one fitted on one task can raise the error on another.
-- Choice rotations raised K2-Horizon's accuracy by up to 12 points and lowered its NLL and Brier score on every choice task, but raised the calibration error of the emotion task, so the example config leaves them off. Turn them on when accuracy matters more than calibration without labels, or fit a profile on top of them.
-- Content-free priors (asking each question about `N/A`) and the batch prior were measured and not kept: both lowered accuracy on skewed tasks.
+- Only fitted calibrations make probabilities trustworthy for thresholds, and only for the question they were fitted on: the fit tool chose Platt scaling, temperature, or vector scaling per question, and its temperatures ran from 0.5, where K2-Horizon was underconfident, to 5.4.
+- Vector scaling also raised accuracy where a model prefers some options regardless of the input (emotion 0.46 to 0.52, Banking77 0.60 to 0.63, SST-5 0.27 to 0.35).
+- Choice rotations raised K2-Horizon's accuracy by up to 12 points and lowered its NLL and Brier score on every choice task, but raised the calibration error of the emotion task without a calibration, so `reads.json` leaves them off by default. Ask for them per request, and fit calibrations with the same reads.
+- Content-free priors (asking each question about `N/A`) and a running batch prior were measured and not kept: both lowered accuracy on skewed tasks.
 - Reads multiply the prompts per question (two for noul, `k` for choice), but they share the state, which is prefilled once per request.
-- Answers move slightly with batch composition and prefix caching, as described in [Reproducibility](#reproducibility). On K2-Horizon-3.7B, two runs of the same label-free reads differed by 0.001 to 0.013 in mean probability and 0.02 to 0.08 at the 99th percentile, and the top answer changed on 0.7% to 2.7% of noul and choice questions and on 7% of the score questions, whose level probabilities are flat.
+- Answers move slightly with batch composition and prefix caching, as described in [Reproducibility](#reproducibility). On K2-Horizon-3.7B, two runs of the same reads differed by 0.001 to 0.014 in mean probability and 0.02 to 0.08 at the 99th percentile, and the top answer changed on 0.3% to 4% of noul and choice questions and on 5% to 8% of the score questions, whose level probabilities are flat.
 
 ## Build decisions without `/v1/decisions`
 

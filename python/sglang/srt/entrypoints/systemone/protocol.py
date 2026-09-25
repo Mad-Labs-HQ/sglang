@@ -31,11 +31,71 @@ MAX_CHOICE_OPTIONS = 255
 MAX_SCORE_LEVELS = 10
 
 
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+
+class _Calibration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # The x_fingerprint of the answers it was fitted on. When sent, a request
+    # whose reads or model differ is refused instead of calibrated wrongly.
+    fitted_on: Optional[str] = None
+
+
+class TemperatureCalibration(_Calibration):
+    """Divides every option's log probability, for any question type."""
+
+    type: Literal["temperature"]
+    temperature: FiniteFloat = Field(gt=0)
+
+
+class PlattCalibration(_Calibration):
+    """Rescales the log odds of yes, for noul questions: P(yes) = sigmoid(a * z + b)."""
+
+    type: Literal["platt"]
+    a: FiniteFloat
+    b: FiniteFloat
+
+
+class VectorCalibration(_Calibration):
+    """A scale and bias per option on its log probability, for choice and score."""
+
+    type: Literal["vector"]
+    scale: List[FiniteFloat] = Field(min_length=1)
+    bias: List[FiniteFloat] = Field(min_length=1)
+
+
+SystemOneCalibration = Annotated[
+    Union[TemperatureCalibration, PlattCalibration, VectorCalibration],
+    Field(discriminator="type"),
+]
+
+
 class _Question(BaseModel):
     # Misspelled keys inside a question would otherwise answer a different question.
     model_config = ConfigDict(extra="forbid")
 
     instructions: Optional[DecisionText] = None
+    # SGLang extension: a calibration the client fitted for this question,
+    # applied after its reads are combined.
+    x_calibration: Optional[SystemOneCalibration] = None
+
+    def _check_calibration(self, allowed: tuple, options: int) -> None:
+        calibration = self.x_calibration
+        if calibration is None:
+            return
+        if calibration.type not in allowed:
+            raise ValueError(
+                f"a {self.type} question takes a {' or '.join(allowed)} "
+                f"calibration, not {calibration.type}"
+            )
+        if isinstance(calibration, VectorCalibration) and not (
+            len(calibration.scale) == len(calibration.bias) == options
+        ):
+            raise ValueError(
+                f"vector calibration needs a scale and bias for each of the "
+                f"{options} options"
+            )
 
 
 class SystemOneNoulCriteria(BaseModel):
@@ -60,6 +120,7 @@ class SystemOneNoulQuestion(_Question):
                 "a noul question needs instructions or a true or false "
                 "description to decide on"
             )
+        self._check_calibration(("temperature", "platt"), options=2)
         return self
 
 
@@ -75,6 +136,11 @@ class SystemOneChoiceQuestion(_Question):
         check_option_names(criteria)
         return criteria
 
+    @model_validator(mode="after")
+    def _calibration_fits(self):
+        self._check_calibration(("temperature", "vector"), options=len(self.criteria))
+        return self
+
 
 class SystemOneScoreQuestion(_Question):
     type: Literal["score"]
@@ -82,11 +148,27 @@ class SystemOneScoreQuestion(_Question):
         min_length=1, max_length=MAX_SCORE_LEVELS
     )
 
+    @model_validator(mode="after")
+    def _calibration_fits(self):
+        self._check_calibration(("temperature", "vector"), options=len(self.criteria))
+        return self
+
 
 SystemOneQuestion = Annotated[
     Union[SystemOneNoulQuestion, SystemOneChoiceQuestion, SystemOneScoreQuestion],
     Field(discriminator="type"),
 ]
+
+
+class SystemOneReadSetup(BaseModel):
+    """How to read each question, as the server's reads config names the fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    choice_rotations: int = Field(ge=1)
+    choice_name_variants: bool
+    noul_orders: int = Field(ge=1, le=2)
+    noul_case_variants: bool
 
 
 class SystemOneRequest(BaseModel):
@@ -96,9 +178,9 @@ class SystemOneRequest(BaseModel):
     questions: Dict[str, SystemOneQuestion] = Field(min_length=1)
     # SGLang extension, for chat templates whose reasoning toggle needs a kwarg.
     chat_template_kwargs: Dict[str, Any] = Field(default_factory=dict)
-    # SGLang extensions: the calibration mode, the server default when not sent,
-    # and whether answers include the label logprobs of every read.
-    x_calibration: Optional[Literal["raw", "label_free", "fitted"]] = None
+    # SGLang extensions: how to read every question, the server's default reads
+    # when not sent, and whether answers include the label logprobs of every read.
+    x_read_setup: Optional[SystemOneReadSetup] = None
     x_return_reads: bool = False
 
     # /v1/decisions fields, which would change the answers if honored or ignored.
@@ -128,17 +210,23 @@ class SystemOneRead(BaseModel):
     logprobs: Dict[str, List[float]]
 
 
-# Answer fields are declared per type so the published fields come first.
-# x_label_mass is the full-vocabulary probability of the answer labels,
-# x_calibration the calibration mode applied, and x_reads every read of the
-# question when the request sets x_return_reads, all SGLang extensions.
+# Answer fields are declared per type so the published fields come first. The
+# x_ fields are SGLang extensions: x_label_mass is the full-vocabulary
+# probability of the tokens scored in the read that shows options in request
+# order, x_read_probabilities the option probabilities of the combined reads
+# before any calibration, x_calibration the calibration applied, x_fingerprint
+# what a calibration fitted on this answer must be sent with, and x_reads every
+# read when the request sets x_return_reads.
+CalibrationApplied = Literal["none", "temperature", "platt", "vector"]
 
 
 class SystemOneNoulAnswer(BaseModel):
     type: Literal["noul"] = "noul"
     noul: float
     x_label_mass: float
-    x_calibration: Literal["raw", "label_free", "fitted"]
+    x_read_probabilities: Dict[str, float]
+    x_calibration: CalibrationApplied
+    x_fingerprint: str
     x_reads: Optional[List[SystemOneRead]] = None
 
 
@@ -148,7 +236,9 @@ class SystemOneChoiceAnswer(BaseModel):
     confidence: float
     probabilities: Dict[str, float]
     x_label_mass: float
-    x_calibration: Literal["raw", "label_free", "fitted"]
+    x_read_probabilities: Dict[str, float]
+    x_calibration: CalibrationApplied
+    x_fingerprint: str
     x_reads: Optional[List[SystemOneRead]] = None
 
 
@@ -159,7 +249,9 @@ class SystemOneScoreAnswer(BaseModel):
     legend: Dict[str, Any]
     probabilities: Dict[str, float]
     x_label_mass: float
-    x_calibration: Literal["raw", "label_free", "fitted"]
+    x_read_probabilities: Dict[str, float]
+    x_calibration: CalibrationApplied
+    x_fingerprint: str
     x_reads: Optional[List[SystemOneRead]] = None
 
 
