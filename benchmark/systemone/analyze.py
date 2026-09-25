@@ -2,10 +2,11 @@
 
 Strategies are computed offline with the functions the server uses, from one
 collection: which reads to combine (choice rotations, noul orders), whether
-label variants count, and what is applied after (running batch prior,
-content-free prior, fitted temperature or Platt scaling). Metrics are on the
-``test`` half of each task; fitted parameters and batch priors see the ``fit``
-half first, as a server would see traffic before labeled rows.
+label variants count, and what is applied after (a running batch prior or a
+content-free prior, measured here only, or the calibration the fit tool would
+choose: temperature, Platt scaling, or vector scaling). Metrics are on the
+``test`` half of each task; calibrations are fitted on the ``fit`` half, and
+batch priors see it first, as a server would see traffic before labeled rows.
 
 Label-free components are then chosen by the rule fixed before the run: one is
 kept when, added to those already kept, it lowers the mean test ECE over the
@@ -19,12 +20,12 @@ import argparse
 import json
 import math
 import os
-from typing import Dict, List, NamedTuple, Optional
+from collections import OrderedDict
+from typing import Dict, List, NamedTuple, Optional, Sequence
 
 from sglang.srt.entrypoints.systemone.calibration import (
-    BatchPriorOn,
-    BatchPriors,
-    apply_params,
+    BUILTIN_MAX_CHOICE_ROTATIONS,
+    apply_calibration,
     combine_reads,
     log_normalize,
     read_log_probabilities,
@@ -33,11 +34,9 @@ from sglang.srt.entrypoints.systemone.calibration import (
 from sglang.srt.entrypoints.systemone.calibration_fit import (
     auroc,
     brier,
-    cross_validated_nll,
+    choose_calibration,
     decidable_share,
     expected_calibration_error,
-    fit_platt,
-    fit_temperature,
     nll,
     quadratic_weighted_kappa,
     ranked_probability_score,
@@ -57,7 +56,32 @@ TASK_ORDER = [
 ]
 MAX_ACCURACY_LOSS = 0.01
 BATCH_PRIOR_MIN_COUNT = 8
-BATCH_PRIOR_MAX_KEYS = 4096
+# /v1/decisions names of the System One question types.
+DECISION_KINDS = {"noul": "yes_no", "choice": "choice", "score": "score"}
+
+
+class BatchPriors:
+    """Running mean of each question's probabilities, divided out once seen enough
+    (Batch Calibration). Measured here only; the server keeps no such state."""
+
+    def __init__(self, strength: float, min_count: int):
+        self.strength = strength
+        self.min_count = min_count
+        self._sums: OrderedDict[str, tuple] = OrderedDict()
+
+    def apply(self, key: str, log_q: Sequence[float]) -> List[float]:
+        count, sums = self._sums.pop(key, (0, [0.0] * len(log_q)))
+        count += 1
+        sums = [s + math.exp(v) for s, v in zip(sums, log_q)]
+        self._sums[key] = (count, sums)
+        if count < self.min_count:
+            return list(log_q)
+        return log_normalize(
+            [
+                v - self.strength * math.log(max(s / count, 1e-300))
+                for v, s in zip(log_q, sums)
+            ]
+        )
 
 
 class Reads(NamedTuple):
@@ -158,11 +182,7 @@ def strategy_rows(rows, content_free, kind: str, strategy: Strategy):
         ]
     if strategy.batch_prior:
         priors = BatchPriors(
-            BatchPriorOn(
-                strength=strategy.batch_prior,
-                min_count=BATCH_PRIOR_MIN_COUNT,
-                max_keys=BATCH_PRIOR_MAX_KEYS,
-            )
+            strength=strategy.batch_prior, min_count=BATCH_PRIOR_MIN_COUNT
         )
         # Rows arrive fit half first, then test half, as collected.
         values = [
@@ -174,16 +194,18 @@ def strategy_rows(rows, content_free, kind: str, strategy: Strategy):
     test = [i for i, row in enumerate(rows) if row["split"] == "test"]
     fit_note = None
     if strategy.fitted:
-        fitter = fit_platt if kind == "noul" else fit_temperature
-        fit_q, fit_gold = [values[i] for i in fit], [gold[i] for i in fit]
-        before, after = cross_validated_nll(fit_q, fit_gold, fitter, folds=5)
-        params = fitter(fit_q, fit_gold)
-        # The fit tool keeps a profile only when it helps out of fold.
-        if after < before:
-            values = [apply_params(params, value) for value in values]
-            fit_note = params
+        # The calibration the fit tool would send for this question.
+        calibration, _ = choose_calibration(
+            DECISION_KINDS[kind],
+            [values[i] for i in fit],
+            [gold[i] for i in fit],
+            folds=5,
+        )
+        if calibration is None:
+            fit_note = "none"
         else:
-            fit_note = "kept identity"
+            values = [apply_calibration(calibration, value) for value in values]
+            fit_note = calibration["type"]
     return [values[i] for i in test], [gold[i] for i in test], fit_note
 
 
@@ -328,29 +350,17 @@ def choose_label_free(data, tasks):
 
 
 def label_free_config(chosen: Dict[str, object]) -> dict:
-    """A server calibration config with the chosen label-free components."""
-    if chosen["content_free"]:
-        raise ValueError("the server has no content-free prior; implement it first")
-    batch_prior = (
-        {
-            "type": "on",
-            "strength": chosen["batch_prior"],
-            "min_count": BATCH_PRIOR_MIN_COUNT,
-            "max_keys": BATCH_PRIOR_MAX_KEYS,
-        }
-        if chosen["batch_prior"]
-        else {"type": "off"}
-    )
+    """A server reads config whose default reads are the chosen components."""
+    if chosen["content_free"] or chosen["batch_prior"]:
+        raise ValueError("the server reads no content-free or batch priors")
     return {
-        "default_mode": "label_free",
-        "label_free": {
+        "default_reads": {
             "choice_rotations": chosen["choice_rotations"],
             "choice_name_variants": chosen["choice_name_variants"],
             "noul_orders": chosen["noul_orders"],
             "noul_case_variants": chosen["noul_case_variants"],
-            "batch_prior": batch_prior,
         },
-        "fitted": None,
+        "max_choice_rotations": BUILTIN_MAX_CHOICE_ROTATIONS,
     }
 
 
@@ -477,7 +487,7 @@ def main():
             table(summary),
         ]
     )
-    with open(os.path.join(args.out, "label_free.json"), "w") as f:
+    with open(os.path.join(args.out, "reads.json"), "w") as f:
         json.dump(label_free_config(chosen), f, indent=2)
         f.write("\n")
     with open(os.path.join(args.out, "efficacy.md"), "w") as f:

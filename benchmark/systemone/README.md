@@ -25,36 +25,41 @@ from, and every metric is on the `test` half (300 rows).
 
 ## Scripts
 
-Launch the server with the collection config, which makes every label-free read:
+Launch the server. The collection asks for its reads per request, so it needs no
+reads config:
 
 ```bash
 python -m sglang.launch_server --model-path IFM/K2-Horizon-3.7B \
   --revision 85f683bc15947495341baa91ae1246dcecc47407 --reasoning-parser k2_horizon \
   --attention-backend flashinfer --context-length 32768 --mem-fraction-static 0.85 \
-  --disable-prefill-cuda-graph --enable-metrics --port 30000 \
-  --decision-calibration-config benchmark/systemone/configs/collect.json
+  --disable-prefill-cuda-graph --enable-metrics --port 30000
 ```
 
 | script | what it does |
 | --- | --- |
-| `collect.py` | Asks every row with `x_calibration=label_free` and `x_return_reads=true`, plus one content-free (`N/A`) read per question, into `runs/` |
-| `analyze.py` | Computes every calibration strategy offline from those reads with the server's own functions, applies the label-free selection rule, and writes `efficacy.md`, `efficacy.json`, and the chosen `label_free.json` |
+| `collect.py` | Asks every row with the widest reads (`x_read_setup`: 8 rotations, name and case variants, both yes/no orders) and `x_return_reads=true`, plus one content-free (`N/A`) read per question, into `runs/` |
+| `analyze.py` | Computes every strategy offline from those reads with the server's own functions, applies the label-free selection rule, and writes `efficacy.md`, `efficacy.json`, and the chosen default reads as `reads.json` |
 | `ablate_think_tag.py` | Compares K2-Horizon's empty `think`, `think_fast`, and `think_faster` blocks as the answer position |
 | `reasoning_arms.py` | Reasons first (medium or high effort), then reads the labels: the System 2 reference |
-| `verify_server.py` | Exports the fit half for the fit tool, and checks a server's answers in a mode against its reads |
-| `bench_speed.py` | Latency and throughput over state length, questions per request, mode, and load |
+| `verify_server.py` | Exports the fit half for the fit tool, and checks a server's answers, calibrated or not, against their reads |
+| `drift.py` | Compares served answers with the same reads from the collection run |
+| `bench_speed.py` | Latency and throughput over state length, questions per request, reads, and load |
+| `sdk_check.py` | Asks the server through the official TypeSafe Python SDK |
 
 ```bash
 cd benchmark/systemone
 python collect.py --url http://127.0.0.1:30000 --rows 600 --concurrency 8 --out runs/k2-horizon-3.7b
 python analyze.py --run runs/k2-horizon-3.7b --out results/k2-horizon-3.7b-rtx5070ti
 python verify_server.py export --rows 600 --out runs/labeled_fit.jsonl
-# Relaunch with --decision-calibration-config examples/runtime/systemone/label_free.json, then:
+# Relaunch with --decision-reads-config ../../examples/runtime/systemone/reads.json, then:
 python -m sglang.srt.entrypoints.systemone.fit_calibration --url http://127.0.0.1:30000 \
-  --config ../../examples/runtime/systemone/label_free.json --base label_free \
-  --data runs/labeled_fit.jsonl --min-rows 50 --folds 5 --out results/k2-horizon-3.7b-rtx5070ti/fitted.json
-python verify_server.py check --url http://127.0.0.1:30000 --mode label_free --rows 600 \
-  --concurrency 8 --config ../../examples/runtime/systemone/label_free.json --out results/k2-horizon-3.7b-rtx5070ti/served_label_free.md
+  --data runs/labeled_fit.jsonl --min-rows 50 --folds 5 --concurrency 8 \
+  --out results/k2-horizon-3.7b-rtx5070ti/calibrations.json
+python verify_server.py check --url http://127.0.0.1:30000 --rows 600 --concurrency 8 \
+  --out results/k2-horizon-3.7b-rtx5070ti/served_label_free.md
+python verify_server.py check --url http://127.0.0.1:30000 --rows 600 --concurrency 8 \
+  --calibrations results/k2-horizon-3.7b-rtx5070ti/calibrations.json \
+  --out results/k2-horizon-3.7b-rtx5070ti/served_calibrated.md
 ```
 
 ## Results: K2-Horizon-3.7B on an RTX 5070 Ti
@@ -70,9 +75,11 @@ python verify_server.py check --url http://127.0.0.1:30000 --mode label_free --r
   variants and reading both orders (`label_free`) raises noul accuracy from 0.70
   to 0.86 and lowers ECE from 0.23 to 0.15, with no labeled data.
 - Choice and score questions gain nothing from the label-free components kept by
-  the selection rule. Fitted profiles are what calibrate them: ECE drops to
-  0.04 to 0.10, and to 0.03 to 0.05 on score questions, whose fitted
-  temperatures (3.7 to 5.3) show how overconfident raw level reads are.
+  the selection rule. Calibrations fitted per question on the client are what
+  calibrate them: ECE drops to 0.03 to 0.09 on every task. The fit tool picked
+  vector scaling for four questions, which also removes a model's preference for
+  some options and so raises accuracy (emotion 0.46 to 0.52, Banking77 0.60 to
+  0.63, SST-5 0.27 to 0.35); a temperature cannot.
 - Choice rotations raise accuracy by up to 12 points (Banking77 0.60 to 0.72
   with 4 rotations) and lower NLL and Brier on every choice task, but raised the
   emotion task's ECE, so the pre-registered ECE rule left them off.
@@ -86,21 +93,23 @@ python verify_server.py check --url http://127.0.0.1:30000 --mode label_free --r
 
 ### Efficacy per task (test half, 300 rows)
 
-`raw` is from the collection run; `label_free` and `fitted` are the server's own
-answers in those modes (`served_label_free.md`, `served_fitted.md`), each checked
-to equal its reads recombined within 3e-16. `fitted` uses the 15 profiles the fit
-tool wrote from the fit halves (`fitted.json`).
+The single read is from the collection run; the default reads (`reads.json`:
+both yes/no orders and case variants) and the calibrated answers are the
+server's own (`served_label_free.md`, `served_calibrated.md`), each checked to
+equal its reads recombined, and calibrated, within 2e-16. The calibrations are
+the ones the fit tool wrote from the fit halves (`calibrations.json`), one per
+task.
 
-| task | type | raw acc / ECE / NLL | label_free acc / ECE / NLL | fitted acc / ECE / NLL |
-| --- | --- | --- | --- | --- |
-| boolq | noul | 0.663 / 0.277 / 0.676 | 0.810 / 0.138 / 0.472 | 0.827 / 0.080 / 0.451 |
-| sst2 | noul | 0.590 / 0.276 / 0.692 | 0.807 / 0.168 / 0.481 | 0.827 / 0.080 / 0.373 |
-| ag_news_sports | noul | 0.857 / 0.142 / 0.258 | 0.967 / 0.139 / 0.188 | 0.967 / 0.044 / 0.094 |
-| ag_news | choice | 0.890 / 0.044 / 0.336 | 0.890 / 0.040 / 0.341 | 0.887 / 0.042 / 0.333 |
-| emotion | choice | 0.460 / 0.200 / 1.709 | 0.460 / 0.197 / 1.705 | 0.467 / 0.079 / 1.482 |
-| banking77 | choice | 0.600 / 0.098 / 2.108 | 0.597 / 0.112 / 2.105 | 0.593 / 0.104 / 1.984 |
-| sst5 | score | 0.273 / 0.262 / 1.805 | 0.273 / 0.260 / 1.796 | 0.267 / 0.053 / 1.540 |
-| yelp | score | 0.277 / 0.178 / 1.790 | 0.263 / 0.186 / 1.790 | 0.260 / 0.027 / 1.573 |
+| task | type | single read acc / ECE / NLL | default reads | default reads, calibrated | calibration |
+| --- | --- | --- | --- | --- | --- |
+| boolq | noul | 0.663 / 0.277 / 0.676 | 0.807 / 0.138 / 0.469 | 0.823 / 0.060 / 0.408 | platt |
+| sst2 | noul | 0.590 / 0.276 / 0.692 | 0.810 / 0.167 / 0.483 | 0.820 / 0.064 / 0.380 | platt |
+| ag_news_sports | noul | 0.857 / 0.142 / 0.258 | 0.980 / 0.136 / 0.188 | 0.980 / 0.044 / 0.091 | temperature |
+| ag_news | choice | 0.890 / 0.044 / 0.336 | 0.887 / 0.041 / 0.344 | 0.893 / 0.033 / 0.313 | vector |
+| emotion | choice | 0.460 / 0.200 / 1.709 | 0.460 / 0.198 / 1.699 | 0.517 / 0.083 / 1.285 | vector |
+| banking77 | choice | 0.600 / 0.098 / 2.108 | 0.597 / 0.116 / 2.120 | 0.630 / 0.055 / 1.762 | vector |
+| sst5 | score | 0.273 / 0.262 / 1.805 | 0.273 / 0.259 / 1.787 | 0.347 / 0.090 / 1.408 | vector |
+| yelp | score | 0.277 / 0.178 / 1.790 | 0.260 / 0.201 / 1.793 | 0.260 / 0.030 / 1.574 | temperature |
 
 ### Label-free components
 
@@ -132,7 +141,7 @@ that shows options in request order:
 | yelp | 0.143 | | |
 
 `efficacy.md` has every strategy on every task, including rotations with and
-without fitted temperatures.
+without fitted calibrations.
 
 ### Reasoning first
 
@@ -189,19 +198,19 @@ is 1.46 s with priming, 3.13 s without, and 2.42 s with `lpm`; throughput is 83,
 
 ### Drift
 
-`drift.md` compares the served label-free answers with the same reads from the
-collection run, which batched and cached differently:
+`drift.md` compares the served default-reads answers with the same reads from
+the collection run, which batched and cached differently:
 
 | task | mean abs diff | p99 abs diff | top answer flips |
 | --- | --- | --- | --- |
-| boolq | 0.0088 | 0.0309 | 0.007 |
-| sst2 | 0.0109 | 0.0403 | 0.023 |
-| ag_news_sports | 0.0067 | 0.0288 | 0.007 |
-| ag_news | 0.0051 | 0.0751 | 0.007 |
-| emotion | 0.0078 | 0.0565 | 0.013 |
-| banking77 | 0.0010 | 0.0222 | 0.027 |
-| sst5 | 0.0133 | 0.0792 | 0.067 |
-| yelp | 0.0100 | 0.0526 | 0.077 |
+| boolq | 0.0080 | 0.0316 | 0.003 |
+| sst2 | 0.0119 | 0.0395 | 0.013 |
+| ag_news_sports | 0.0070 | 0.0281 | 0.007 |
+| ag_news | 0.0056 | 0.0732 | 0.010 |
+| emotion | 0.0082 | 0.0566 | 0.010 |
+| banking77 | 0.0011 | 0.0248 | 0.040 |
+| sst5 | 0.0136 | 0.0756 | 0.047 |
+| yelp | 0.0098 | 0.0440 | 0.083 |
 
 ### Setup notes
 
@@ -220,16 +229,16 @@ collection and analysis on `Qwen/Qwen3-0.6B` (BF16, same GPU, collection config,
 an always-open reasoning block, are in `results/qwen3-0.6b-rtx5070ti/`.
 Offline strategies on the test half:
 
-| task | type | raw acc / ECE / NLL | label_free | label_free + fitted | choice rotations 4 |
-| --- | --- | --- | --- | --- | --- |
-| boolq | noul | 0.663 / 0.283 / 1.215 | 0.667 / 0.230 / 0.839 | 0.690 / 0.080 / 0.569 |  |
-| sst2 | noul | 0.520 / 0.438 / 1.624 | 0.517 / 0.391 / 1.246 | 0.707 / 0.078 / 0.579 |  |
-| ag_news_sports | noul | 0.983 / 0.068 / 0.125 | 0.973 / 0.033 / 0.080 | 0.973 / 0.033 / 0.080 |  |
-| ag_news | choice | 0.840 / 0.124 / 0.788 | 0.840 / 0.124 / 0.788 | 0.840 / 0.045 / 0.477 | 0.810 / 0.124 / 0.768 |
-| emotion | choice | 0.500 / 0.275 / 2.303 | 0.500 / 0.275 / 2.303 | 0.500 / 0.085 / 1.440 | 0.520 / 0.256 / 1.799 |
-| banking77 | choice | 0.073 / 0.485 / 8.200 | 0.073 / 0.485 / 8.200 | 0.073 / 0.034 / 4.258 | 0.237 / 0.091 / 3.828 |
-| sst5 | score | 0.220 / 0.766 / 5.092 | 0.220 / 0.766 / 5.092 | 0.220 / 0.063 / 1.604 |  |
-| yelp | score | 0.247 / 0.265 / 1.994 | 0.247 / 0.265 / 1.994 | 0.247 / 0.035 / 1.578 |  |
+| task | type | single read acc / ECE / NLL | default reads | default reads, calibrated | calibration | choice rotations 4 |
+| --- | --- | --- | --- | --- | --- | --- |
+| boolq | noul | 0.663 / 0.283 / 1.215 | 0.667 / 0.230 / 0.839 | 0.690 / 0.080 / 0.569 | platt |  |
+| sst2 | noul | 0.520 / 0.438 / 1.624 | 0.517 / 0.391 / 1.246 | 0.707 / 0.078 / 0.579 | platt |  |
+| ag_news_sports | noul | 0.983 / 0.068 / 0.125 | 0.973 / 0.033 / 0.080 | 0.973 / 0.033 / 0.080 | none |  |
+| ag_news | choice | 0.840 / 0.124 / 0.788 | 0.840 / 0.124 / 0.788 | 0.880 / 0.043 / 0.370 | vector | 0.810 / 0.124 / 0.768 |
+| emotion | choice | 0.500 / 0.275 / 2.303 | 0.500 / 0.275 / 2.303 | 0.537 / 0.084 / 1.232 | vector | 0.520 / 0.256 / 1.799 |
+| banking77 | choice | 0.073 / 0.485 / 8.200 | 0.073 / 0.485 / 8.200 | 0.073 / 0.034 / 4.258 | temperature | 0.237 / 0.091 / 3.828 |
+| sst5 | score | 0.220 / 0.766 / 5.092 | 0.220 / 0.766 / 5.092 | 0.323 / 0.037 / 1.507 | vector |  |
+| yelp | score | 0.247 / 0.265 / 1.994 | 0.247 / 0.265 / 1.994 | 0.317 / 0.073 / 1.514 | vector |  |
 
 - The selection rule kept the same components as on K2-Horizon, for different
   reasons: rotations lowered choice ECE by up to 0.14 and raised Banking77
@@ -237,6 +246,9 @@ Offline strategies on the test half:
   lowered ECE by up to 0.16 but cost up to 3.7 points.
 - Its letter bias on 77 options is extreme: every Banking77 row changes its top
   answer across rotations, and the raw read is near chance.
-- Fitted profiles bring every task's ECE to 0.03 to 0.09, and Platt scaling
-  moves the yes or no threshold where the raw read is biased (SST-2 accuracy
-  0.52 to 0.71).
+- Calibrations fitted per question bring every task's ECE to 0.03 to 0.09.
+  Platt scaling moves the yes or no threshold where the read is biased (SST-2
+  accuracy 0.52 to 0.71), and vector scaling raises accuracy on four of the
+  five choice and score tasks (SST-5 0.22 to 0.32, Yelp 0.25 to 0.32). On
+  Banking77, whose single read is near chance, only a temperature helped, while
+  rotations raised accuracy to 0.24: reads and calibrations fix different things.
