@@ -1,0 +1,175 @@
+{
+  "default_mode": "fitted",
+  "label_free": {
+    "choice_rotations": 1,
+    "choice_name_variants": false,
+    "noul_orders": 2,
+    "noul_case_variants": true,
+    "batch_prior": {
+      "type": "off"
+    }
+  },
+  "fitted": {
+    "model": "IFM/K2-Horizon-3.7B",
+    "model_revision": "85f683bc15947495341baa91ae1246dcecc47407",
+    "prompt_format_version": 1,
+    "base": "label_free",
+    "reads_fingerprint": "label_free:{\"choice_name_variants\":false,\"choice_rotations\":1,\"noul_case_variants\":true,\"noul_orders\":2}",
+    "profiles": [
+      {
+        "key": "bucket:yes_no:2",
+        "params": {
+          "type": "platt",
+          "a": 1.8874812736476534,
+          "b": 0.7233773638058832
+        },
+        "rows": 900,
+        "oof_nll_base": 0.3830547842565606,
+        "oof_nll_fitted": 0.33493501494817207
+      },
+      {
+        "key": "type:yes_no",
+        "params": {
+          "type": "platt",
+          "a": 1.8874812736476534,
+          "b": 0.7233773638058832
+        },
+        "rows": 900,
+        "oof_nll_base": 0.3830547842565606,
+        "oof_nll_fitted": 0.33493501494817207
+      },
+      {
+        "key": "signature:9e08419d4a7d4e84d414376abc695e61d9ddc2d53c332779fc3a1c3b3a838e47",
+        "params": {
+          "type": "platt",
+          "a": 3.074926097322594,
+          "b": 1.222359623275853
+        },
+        "rows": 300,
+        "oof_nll_base": 0.47723999615371276,
+        "oof_nll_fitted": 0.3642413821235004
+      },
+      {
+        "key": "signature:e334ebd3a9e987e1323ed5215ad413b4d68503ab9dc617d72dbc57f8b59e5b0c",
+        "params": {
+          "type": "platt",
+          "a": 2.0276477584829764,
+          "b": -0.5216210574390853
+        },
+        "rows": 300,
+        "oof_nll_base": 0.2098130313261051,
+        "oof_nll_fitted": 0.15329809394866475
+      },
+      {
+        "key": "signature:13fc9b0ebfa7c34eef51735aae94e235333c5e3096b7649c91e703ed941e9108",
+        "params": {
+          "type": "temperature",
+          "temperature": 1.4351984834780207
+        },
+        "rows": 300,
+        "oof_nll_base": 0.4357600614112985,
+        "oof_nll_fitted": 0.3997269870921087
+      },
+      {
+        "key": "bucket:choice:4",
+        "params": {
+          "type": "temperature",
+          "temperature": 1.4351984834780207
+        },
+        "rows": 300,
+        "oof_nll_base": 0.4357600614112985,
+        "oof_nll_fitted": 0.3997269870921087
+      },
+      {
+        "key": "type:choice",
+        "params": {
+          "type": "temperature",
+          "temperature": 1.4389267084683572
+        },
+        "rows": 900,
+        "oof_nll_base": 1.3599847029809715,
+        "oof_nll_fitted": 1.2613202668414294
+      },
+      {
+        "key": "signature:1c2ec29e9f41e9665c7dc36ea0124864fd6d48830924cb96297f8f32e27b38b0",
+        "params": {
+          "type": "temperature",
+          "temperature": 1.7590503136244964
+        },
+        "rows": 300,
+        "oof_nll_base": 1.494552202699547,
+        "oof_nll_fitted": 1.3631066984132274
+      },
+      {
+        "key": "bucket:choice:6",
+        "params": {
+          "type": "temperature",
+          "temperature": 1.7590503136244964
+        },
+        "rows": 300,
+        "oof_nll_base": 1.494552202699547,
+        "oof_nll_fitted": 1.3631066984132274
+      },
+      {
+        "key": "signature:5cd5d08fbb9638be0214b67b43724edbbd6c9f56dd946c99412113e207835ebd",
+        "params": {
+          "type": "temperature",
+          "temperature": 1.3623072122870659
+        },
+        "rows": 300,
+        "oof_nll_base": 2.1496418448320687,
+        "oof_nll_fitted": 2.012201424739782
+      },
+      {
+        "key": "bucket:choice:77",
+        "params": {
+          "type": "temperature",
+          "temperature": 1.3623072122870659
+        },
+        "rows": 300,
+        "oof_nll_base": 2.1496418448320687,
+        "oof_nll_fitted": 2.012201424739782
+      },
+      {
+        "key": "signature:3a20533ac2b2163a714dce23b395dae6a66c22bb1d7a97f69f8cf7444cca7ce6",
+        "params": {
+          "type": "temperature",
+          "temperature": 3.6874289200272234
+        },
+        "rows": 300,
+        "oof_nll_base": 1.8264423120375333,
+        "oof_nll_fitted": 1.5627831423316096
+      },
+      {
+        "key": "bucket:score:5",
+        "params": {
+          "type": "temperature",
+          "temperature": 4.23997713537689
+        },
+        "rows": 600,
+        "oof_nll_base": 1.839504903695862,
+        "oof_nll_fitted": 1.5771393386070196
+      },
+      {
+        "key": "type:score",
+        "params": {
+          "type": "temperature",
+          "temperature": 4.23997713537689
+        },
+        "rows": 600,
+        "oof_nll_base": 1.839504903695862,
+        "oof_nll_fitted": 1.5771393386070196
+      },
+      {
+        "key": "signature:c0519821f95030c59c0200262942144ba7a925279c0460343f2c050a7bdea11f",
+        "params": {
+          "type": "temperature",
+          "temperature": 5.284125041394436
+        },
+        "rows": 300,
+        "oof_nll_base": 1.8525674953541904,
+        "oof_nll_fitted": 1.5912823149286766
+      }
+    ]
+  }
+}
