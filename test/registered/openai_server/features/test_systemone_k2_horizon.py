@@ -1,4 +1,4 @@
-"""/v1/systemone on a chat template that always reasons, raw and with label-free calibration."""
+"""/v1/systemone on a chat template that always reasons: raw and label-free reads, client calibrations."""
 
 import json
 import math
@@ -10,6 +10,7 @@ import requests
 from transformers import AutoTokenizer
 
 from sglang.srt.entrypoints.systemone.calibration import (
+    apply_calibration,
     combine_reads,
     read_log_probabilities,
 )
@@ -26,16 +27,20 @@ register_cuda_ci(est_time=150, stage="base-b", runner_config="1-gpu-small")
 
 MODEL = "IFM/K2-Horizon-0.9B"
 
-LABEL_FREE = {
-    "default_mode": "raw",
-    "label_free": {
+RAW_READS = {
+    "choice_rotations": 1,
+    "choice_name_variants": False,
+    "noul_orders": 1,
+    "noul_case_variants": False,
+}
+READS_CONFIG = {
+    "default_reads": {
         "choice_rotations": 3,
         "choice_name_variants": False,
         "noul_orders": 2,
         "noul_case_variants": True,
-        "batch_prior": {"type": "off"},
     },
-    "fitted": None,
+    "max_choice_rotations": 4,
 }
 
 QUESTIONS = {
@@ -59,9 +64,9 @@ class TestSystemOneK2Horizon(CustomTestCase):
     def setUpClass(cls):
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.config_dir = tempfile.TemporaryDirectory()
-        config_path = os.path.join(cls.config_dir.name, "label_free.json")
+        config_path = os.path.join(cls.config_dir.name, "reads.json")
         with open(config_path, "w") as f:
-            json.dump(LABEL_FREE, f)
+            json.dump(READS_CONFIG, f)
         cls.tokenizer = AutoTokenizer.from_pretrained(MODEL)
         # No --reasoning-parser: the template's reasoning markers are detected.
         cls.process = popen_launch_server(
@@ -72,7 +77,7 @@ class TestSystemOneK2Horizon(CustomTestCase):
             other_args=[
                 "--dtype",
                 "bfloat16",
-                "--decision-calibration-config",
+                "--decision-reads-config",
                 config_path,
             ],
         )
@@ -84,13 +89,13 @@ class TestSystemOneK2Horizon(CustomTestCase):
         if hasattr(cls, "config_dir"):
             cls.config_dir.cleanup()
 
-    def _systemone(self, **extensions):
+    def _systemone(self, questions=QUESTIONS, **extensions):
         response = requests.post(
             self.base_url + "/v1/systemone",
             json={
                 "state": STATE,
                 "model": "jev-latest",
-                "questions": QUESTIONS,
+                "questions": questions,
                 **extensions,
             },
             timeout=120,
@@ -99,11 +104,11 @@ class TestSystemOneK2Horizon(CustomTestCase):
         return response.json()["answers"]
 
     def test_raw_answers_have_the_published_shapes(self):
-        answers = self._systemone()
+        answers = self._systemone(x_read_setup=RAW_READS)
         self.assertEqual(list(answers), list(QUESTIONS))
         for question_id, answer in answers.items():
             with self.subTest(question_id):
-                self.assertEqual(answer["x_calibration"], "raw")
+                self.assertEqual(answer["x_calibration"], "none")
                 if answer["type"] == "noul":
                     self.assertTrue(0 <= answer["noul"] <= 1)
                 else:
@@ -133,7 +138,8 @@ class TestSystemOneK2Horizon(CustomTestCase):
         )
 
     def test_label_free_answers_equal_their_reads_combined(self):
-        answers = self._systemone(x_calibration="label_free", x_return_reads=True)
+        # The server's default reads are label-free.
+        answers = self._systemone(x_return_reads=True)
         self.assertEqual(len(answers["team"]["x_reads"]), 3)
         self.assertEqual(len(answers["urgent"]["x_reads"]), 2)
         self.assertEqual(len(answers["mood"]["x_reads"]), 1)
@@ -141,7 +147,7 @@ class TestSystemOneK2Horizon(CustomTestCase):
         self.assertGreater(answers["urgent"]["x_label_mass"], 0.5)
         for question_id, answer in answers.items():
             with self.subTest(question_id):
-                self.assertEqual(answer["x_calibration"], "label_free")
+                self.assertEqual(answer["x_calibration"], "none")
                 names = answer["x_reads"][0]["order"]
                 expected = [
                     math.exp(v)
@@ -159,6 +165,57 @@ class TestSystemOneK2Horizon(CustomTestCase):
                 )
                 for got, want in zip(served, expected):
                     self.assertAlmostEqual(got, want, places=9)
+
+    def test_client_calibrations_apply_to_the_read_probabilities(self):
+        fingerprints = {
+            qid: answer["x_fingerprint"] for qid, answer in self._systemone().items()
+        }
+        calibrations = {
+            "team": {
+                "type": "vector",
+                "scale": [1.1, 0.9, 1.0],
+                "bias": [0.2, -0.1, 0.0],
+            },
+            "urgent": {"type": "platt", "a": 0.7, "b": -0.2},
+            "mood": {"type": "temperature", "temperature": 3.0},
+        }
+        questions = {
+            qid: {
+                **question,
+                "x_calibration": {**calibrations[qid], "fitted_on": fingerprints[qid]},
+            }
+            for qid, question in QUESTIONS.items()
+        }
+        for question_id, answer in self._systemone(questions).items():
+            with self.subTest(question_id):
+                self.assertEqual(
+                    answer["x_calibration"], calibrations[question_id]["type"]
+                )
+                log_q = [math.log(p) for p in answer["x_read_probabilities"].values()]
+                expected = [
+                    math.exp(v)
+                    for v in apply_calibration(calibrations[question_id], log_q)
+                ]
+                served = (
+                    [answer["noul"]]
+                    if answer["type"] == "noul"
+                    else list(answer["probabilities"].values())
+                )
+                for got, want in zip(served, expected):
+                    self.assertAlmostEqual(got, want, places=9)
+        # Raw reads give another fingerprint, so the calibrations are refused.
+        response = requests.post(
+            self.base_url + "/v1/systemone",
+            json={
+                "state": STATE,
+                "model": "jev-latest",
+                "questions": questions,
+                "x_read_setup": RAW_READS,
+            },
+            timeout=120,
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("fit it again", response.json()["message"])
 
 
 if __name__ == "__main__":

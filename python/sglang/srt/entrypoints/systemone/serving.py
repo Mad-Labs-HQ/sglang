@@ -20,6 +20,7 @@ from PIL import Image
 
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionMessageContentImageURL
 from sglang.srt.entrypoints.openai.serving_decisions import (
+    PROMPT_FORMAT_VERSION,
     EncodedQuestion,
     OpenAIServingDecisions,
     QuestionView,
@@ -34,20 +35,15 @@ from sglang.srt.entrypoints.openai.serving_decisions import (
     render_text,
 )
 from sglang.srt.entrypoints.systemone.calibration import (
-    BaseMode,
-    BatchPriorOn,
-    BatchPriors,
-    CalibrationConfig,
-    Mode,
     Read,
-    apply_params,
+    ReadsConfig,
+    ReadSetup,
+    apply_calibration,
     combine_reads,
-    find_profile,
-    identity_read,
     label_variants,
     plan_reads,
-    question_signature,
     read_log_probabilities,
+    reads_fingerprint,
 )
 from sglang.srt.entrypoints.systemone.joint_schema import (
     REFERENCE_MAX_LENGTH,
@@ -87,10 +83,19 @@ _MUTABLE_SOURCES = ("http://", "https://", "file://", "/")
 # Arbitrary; an image whose header runs longer is decoded in full.
 _INLINE_HEADER_CHARS = 1 << 16
 
+
 # Decision and joint schema checkpoints score only their answers, in one read
 # of their own, so their answers keep the shape without these extensions.
 _CHECKPOINT_READOUT_EXCLUDE = {
-    "answers": {"__all__": {"x_label_mass", "x_calibration", "x_reads"}}
+    "answers": {
+        "__all__": {
+            "x_label_mass",
+            "x_read_probabilities",
+            "x_calibration",
+            "x_fingerprint",
+            "x_reads",
+        }
+    }
 }
 
 
@@ -105,10 +110,14 @@ class EncodedRead(msgspec.Struct, frozen=True):
 
 
 class QuestionPlan(msgspec.Struct):
-    """A question and its reads, filled in as the reads are encoded."""
+    """A question, its calibration, and its reads, filled in as they are encoded."""
 
     question_id: str
     view: QuestionView
+    # The client's calibration in its wire format, None when it sent none.
+    calibration: Optional[Dict[str, Any]]
+    # What a calibration fitted on this question's answers is tied to.
+    fingerprint: str
     reads: List[EncodedRead]
 
 
@@ -118,16 +127,18 @@ class SystemOneServing(OpenAIServingDecisions):
 
     route = "/v1/systemone"
 
-    def __init__(self, chat_serving, calibration: Optional[CalibrationConfig]):
+    def __init__(
+        self,
+        chat_serving,
+        reads_config: ReadsConfig,
+        model: str,
+        model_revision: Optional[str],
+    ):
         super().__init__(chat_serving)
-        # None when the server was launched without --decision-calibration-config.
-        self.calibration = calibration
-        self.batch_priors = (
-            BatchPriors(calibration.label_free.batch_prior)
-            if calibration is not None
-            and isinstance(calibration.label_free.batch_prior, BatchPriorOn)
-            else None
-        )
+        self.reads_config = reads_config
+        # What calibrations fitted on this server's answers are tied to.
+        self.model = model
+        self.model_revision = model_revision
 
     def _request_id_prefix(self) -> str:
         return "systemone-"
@@ -144,18 +155,22 @@ class SystemOneServing(OpenAIServingDecisions):
             or (
                 self._refuse_read_extensions(request)
                 if self.decision_config is not None
-                else self._validate_calibration(self._mode(request))
+                else self._validate_reads(request)
             )
         )
 
     def _refuse_read_extensions(self, request: SystemOneRequest) -> Optional[str]:
         """Decision and joint schema checkpoints answer in one read of their own,
         which the read and calibration extensions do not apply to."""
-        if request.x_calibration not in (None, "raw") or request.x_return_reads:
+        if (
+            request.x_read_setup is not None
+            or request.x_return_reads
+            or any(q.x_calibration is not None for q in request.questions.values())
+        ):
             return (
-                f"x_calibration and x_return_reads need a model scored with answer "
-                f"label tokens, and {self.route} serves a decision or joint schema "
-                "checkpoint"
+                "x_read_setup, x_return_reads, and x_calibration need a model "
+                f"scored with answer label tokens, and {self.route} serves a "
+                "decision or joint schema checkpoint"
             )
         return None
 
@@ -181,51 +196,58 @@ class SystemOneServing(OpenAIServingDecisions):
             )
         return None
 
-    def _mode(self, request: SystemOneRequest) -> Mode:
-        if request.x_calibration is not None:
-            return request.x_calibration
-        return self.calibration.default_mode if self.calibration is not None else "raw"
+    def _read_setup(self, request: SystemOneRequest) -> ReadSetup:
+        if request.x_read_setup is None:
+            return self.reads_config.default_reads
+        return ReadSetup(**request.x_read_setup.model_dump())
 
-    def _validate_calibration(self, mode: Mode) -> Optional[str]:
-        if mode == "raw":
-            return None
-        if self.calibration is None:
+    def _fingerprint(self, kind: str, setup: ReadSetup) -> str:
+        return reads_fingerprint(
+            kind=kind,
+            setup=setup,
+            model=self.model,
+            model_revision=self.model_revision,
+            prompt_format_version=PROMPT_FORMAT_VERSION,
+        )
+
+    def _validate_reads(self, request: SystemOneRequest) -> Optional[str]:
+        """Refuse reads above the server's cap and calibrations fitted on other answers."""
+        setup = self._read_setup(request)
+        limit = self.reads_config.max_choice_rotations
+        if setup.choice_rotations > limit:
             return (
-                f"x_calibration {mode!r} needs a server launched with "
-                "--decision-calibration-config"
+                f"x_read_setup asks for {setup.choice_rotations} choice rotations, "
+                f"but this server allows at most {limit}"
             )
-        if mode == "fitted" and self.calibration.fitted is None:
-            return (
-                "x_calibration 'fitted' needs fitted profiles in the server's "
-                "calibration config"
-            )
+        for question_id, question in request.questions.items():
+            calibration = question.x_calibration
+            if calibration is None or calibration.fitted_on is None:
+                continue
+            fingerprint = self._fingerprint(_view(question).kind, setup)
+            if calibration.fitted_on != fingerprint:
+                return (
+                    f"question {question_id!r}: its calibration was fitted on "
+                    f"answers with fingerprint {calibration.fitted_on!r}, but this "
+                    f"model and read setup give {fingerprint!r}; fit it again on "
+                    "answers from this server"
+                )
         return None
-
-    def _base_mode(self, mode: Mode) -> BaseMode:
-        """The mode whose reads a request scores: fitted profiles set their own."""
-        if mode == "fitted":
-            return self.calibration.fitted.base
-        return mode
 
     def _convert_to_internal_request(
         self,
         request: SystemOneRequest,
         raw_request: Request = None,
-    ) -> Tuple[
-        Iterator[Any],
-        Tuple[SystemOneRequest, Any],
-    ]:
-        views = [_view(question) for question in request.questions.values()]
-        if self.joint_head_config is not None:
-            return self._joint_schema_request(request, views), (request, views)
-        if self.decision_config is not None:
+    ) -> Tuple[Iterator[Any], Tuple[SystemOneRequest, Any]]:
+        if self.joint_head_config is not None or self.decision_config is not None:
+            views = [_view(question) for question in request.questions.values()]
+            if self.joint_head_config is not None:
+                return self._joint_schema_request(request, views), (request, views)
             # Lazy, so the async handler can yield to other requests between questions.
             return self._encoded_decider_questions(request, views), (request, views)
-        mode = self._mode(request)
         plans: List[QuestionPlan] = []
         # Lazy, so the async handler can yield to other requests between reads.
-        encoded = self._encoded_reads(request, views, self._base_mode(mode), plans)
-        return encoded, (request, mode, plans)
+        encoded = self._encoded_reads(request, self._read_setup(request), plans)
+        return encoded, (request, plans)
 
     def _joint_schema_request(
         self, request: SystemOneRequest, views: List[QuestionView]
@@ -317,17 +339,14 @@ class SystemOneServing(OpenAIServingDecisions):
                 name: weight / total for name, weight in zip(question_names, weights)
             }
             # The head scores true then false, which the view names yes and no.
-            answers[question_id] = _answer(
+            answers[question_id] = _checkpoint_answer(
                 view=view,
                 probabilities=(
                     [by_name["true"], by_name["false"]]
                     if view.kind == "yes_no"
                     else [by_name[name] for name in view.names]
                 ),
-                mass=1.0,
                 question_id=question_id,
-                applied="raw",
-                reads=None,
             )
         response = SystemOneResponse(
             model=self.tokenizer_manager.served_model_name,
@@ -342,15 +361,15 @@ class SystemOneServing(OpenAIServingDecisions):
     def _encoded_reads(
         self,
         request: SystemOneRequest,
-        views: List[QuestionView],
-        base: BaseMode,
+        setup: ReadSetup,
         plans: List[QuestionPlan],
     ) -> Iterator[Tuple[List[int], List[int]]]:
         """Prompt and token ids of every read, in request order, recording each in plans."""
         text = render_text(request.state)
         chat_template_kwargs = self._chat_template_kwargs(request.chat_template_kwargs)
         pair_labels = None
-        for question_id, view in zip(request.questions, views):
+        for question_id, question in request.questions.items():
+            view = _view(question)
             try:
                 labels = default_labels(view)
                 if view.kind == "choice" and len(view.names) > len(labels):
@@ -365,20 +384,26 @@ class SystemOneServing(OpenAIServingDecisions):
                     labels = pair_labels[: len(view.names)]
                 if view.kind == "score":
                     _check_legend(question_id, view)
-                plan = QuestionPlan(question_id=question_id, view=view, reads=[])
-                plans.append(plan)
-                reads = (
-                    [identity_read(labels)]
-                    if base == "raw"
-                    else plan_reads(view.kind, labels, self.calibration.label_free)
+                calibration = question.x_calibration
+                plan = QuestionPlan(
+                    question_id=question_id,
+                    view=view,
+                    calibration=(
+                        None
+                        if calibration is None
+                        else calibration.model_dump(exclude={"fitted_on"})
+                    ),
+                    fingerprint=self._fingerprint(view.kind, setup),
+                    reads=[],
                 )
-                for read in reads:
+                plans.append(plan)
+                for read in plan_reads(view.kind, labels, setup):
                     prompt_ids, encoded, image_data = self._encode_read(
                         text=text,
                         images=request.images,
                         view=view,
                         read=read,
-                        base=base,
+                        setup=setup,
                         chat_template_kwargs=chat_template_kwargs,
                     )
                     plan.reads.append(encoded)
@@ -392,7 +417,7 @@ class SystemOneServing(OpenAIServingDecisions):
         images: List[ChatCompletionMessageContentImageURL],
         view: QuestionView,
         read: Read,
-        base: BaseMode,
+        setup: ReadSetup,
         chat_template_kwargs: Dict[str, Any],
     ) -> Tuple[List[int], EncodedRead, List[ImageData]]:
         """Prompt ids of a read, its label tokens followed by any variant tokens,
@@ -420,17 +445,17 @@ class SystemOneServing(OpenAIServingDecisions):
             groups[option].append(position)
             texts[option].append(read.labels[position])
         token_ids = list(label_ids)
-        if base == "label_free":
-            for option, variant, token_id in self._variant_tokens(
-                view=view,
-                read=read,
-                prompt=prompt,
-                prompt_ids=prompt_ids,
-                label_ids=label_ids,
-            ):
-                groups[option].append(len(token_ids))
-                texts[option].append(variant)
-                token_ids.append(token_id)
+        for option, variant, token_id in self._variant_tokens(
+            view=view,
+            read=read,
+            setup=setup,
+            prompt=prompt,
+            prompt_ids=prompt_ids,
+            label_ids=label_ids,
+        ):
+            groups[option].append(len(token_ids))
+            texts[option].append(variant)
+            token_ids.append(token_id)
         return (
             prompt_ids,
             EncodedRead(read=read, token_ids=token_ids, groups=groups, texts=texts),
@@ -441,11 +466,21 @@ class SystemOneServing(OpenAIServingDecisions):
         self,
         view: QuestionView,
         read: Read,
+        setup: ReadSetup,
         prompt: str,
         prompt_ids: List[int],
         label_ids: List[int],
     ) -> List[Tuple[int, str, int]]:
         """(option, text, token) of each variant whose token no other option or label has."""
+        variants = [
+            (option, variant)
+            for position, option in enumerate(read.order)
+            for variant in label_variants(
+                view.kind, read.labels[position], view.names[option], setup
+            )
+        ]
+        if not variants:
+            return []
         tokenizer = self.tokenizer_manager.tokenizer
         text, text_ids, _ = label_context(
             tokenizer, prompt, prompt_ids, self.added_tokens
@@ -453,16 +488,10 @@ class SystemOneServing(OpenAIServingDecisions):
         # Case variants must be whole labels, name variants only need to start one.
         encode = label_token_id if view.kind == "yes_no" else first_token_id
         claims: Dict[int, Dict[int, str]] = {}
-        for position, option in enumerate(read.order):
-            for variant in label_variants(
-                view.kind,
-                read.labels[position],
-                view.names[option],
-                self.calibration.label_free,
-            ):
-                token_id = encode(tokenizer, text, text_ids, variant)
-                if token_id is not None and token_id not in label_ids:
-                    claims.setdefault(token_id, {}).setdefault(option, variant)
+        for option, variant in variants:
+            token_id = encode(tokenizer, text, text_ids, variant)
+            if token_id is not None and token_id not in label_ids:
+                claims.setdefault(token_id, {}).setdefault(option, variant)
         return [
             (option, variant, token_id)
             for token_id, owners in claims.items()
@@ -549,7 +578,7 @@ class SystemOneServing(OpenAIServingDecisions):
             return await self._answer_decider(
                 adapted_request, request, views, raw_request
             )
-        request, mode, plans = processed
+        request, plans = processed
         prompts, label_token_ids, image_data = await encode_all(adapted_request)
         result = await self._score_prompts(
             prompts=prompts,
@@ -562,9 +591,8 @@ class SystemOneServing(OpenAIServingDecisions):
         start = 0
         for plan in plans:
             end = start + len(plan.reads)
-            answers[plan.question_id] = self._answer_question(
+            answers[plan.question_id] = _answer_question(
                 plan=plan,
-                mode=mode,
                 scores=result.scores[start:end],
                 token_logprobs=result.token_logprobs[start:end],
                 return_reads=request.x_return_reads,
@@ -597,13 +625,10 @@ class SystemOneServing(OpenAIServingDecisions):
         )
         answers = {}
         for i, question_id in enumerate(request.questions):
-            answers[question_id] = _answer(
+            answers[question_id] = _checkpoint_answer(
                 view=views[i],
                 probabilities=result.scores[i],
-                mass=label_mass(result.token_logprobs[i]),
                 question_id=question_id,
-                applied="raw",
-                reads=None,
             )
         response = SystemOneResponse(
             model=self.tokenizer_manager.served_model_name,
@@ -615,60 +640,52 @@ class SystemOneServing(OpenAIServingDecisions):
             content=response.model_dump(exclude=_CHECKPOINT_READOUT_EXCLUDE)
         )
 
-    def _answer_question(
-        self,
-        plan: QuestionPlan,
-        mode: Mode,
-        scores: List[List[float]],
-        token_logprobs: List[List[float]],
-        return_reads: bool,
-    ):
-        """The answer of one question from the scores of its reads, in its mode."""
-        view = plan.view
-        applied = mode
-        if mode == "raw":
-            # Exactly the probabilities /v1/decisions reports.
-            probabilities = scores[0]
-        else:
-            log_q = combine_reads(
-                [
-                    read_log_probabilities(
-                        [[logprobs[k] for k in group] for group in read.groups]
-                    )
-                    for read, logprobs in zip(plan.reads, token_logprobs)
-                ]
+
+def _answer_question(
+    plan: QuestionPlan,
+    scores: List[List[float]],
+    token_logprobs: List[List[float]],
+    return_reads: bool,
+):
+    """The answer of one question from the scores of its reads and its calibration."""
+    view = plan.view
+    log_q = combine_reads(
+        [
+            read_log_probabilities(
+                [[logprobs[k] for k in group] for group in read.groups]
             )
-            signature = question_signature(
-                view.kind, view.question, view.names, view.details
-            )
-            if mode == "label_free" and self.batch_priors is not None:
-                log_q = self.batch_priors.apply(signature, log_q)
-            if mode == "fitted":
-                profile = find_profile(
-                    self.calibration.fitted, view.kind, len(view.names), signature
-                )
-                if profile is None:
-                    applied = self.calibration.fitted.base
-                else:
-                    log_q = apply_params(profile.params, log_q)
-            probabilities = [math.exp(value) for value in log_q]
-        reads = (
-            [
-                _read_report(view, read, logprobs)
-                for read, logprobs in zip(plan.reads, token_logprobs)
-            ]
-            if return_reads
-            else None
-        )
-        return _answer(
-            view=view,
-            probabilities=probabilities,
-            # The first read shows the options in request order.
-            mass=label_mass(token_logprobs[0]),
-            question_id=plan.question_id,
-            applied=applied,
-            reads=reads,
-        )
+            for read, logprobs in zip(plan.reads, token_logprobs)
+        ]
+    )
+    single = len(plan.reads) == 1 and all(len(g) == 1 for g in plan.reads[0].groups)
+    # A single read of the labels alone reports exactly what /v1/decisions does.
+    read_probabilities = scores[0] if single else [math.exp(v) for v in log_q]
+    if plan.calibration is None:
+        probabilities, applied = read_probabilities, "none"
+    else:
+        probabilities = [
+            math.exp(v) for v in apply_calibration(plan.calibration, log_q)
+        ]
+        applied = plan.calibration["type"]
+    reads = (
+        [
+            _read_report(view, read, logprobs)
+            for read, logprobs in zip(plan.reads, token_logprobs)
+        ]
+        if return_reads
+        else None
+    )
+    return _answer(
+        view=view,
+        probabilities=probabilities,
+        read_probabilities=read_probabilities,
+        # The first read shows the options in request order.
+        mass=label_mass(token_logprobs[0]),
+        question_id=plan.question_id,
+        applied=applied,
+        fingerprint=plan.fingerprint,
+        reads=reads,
+    )
 
 
 def _read_report(
@@ -715,15 +732,25 @@ def _view(question: SystemOneQuestion) -> QuestionView:
 def _answer(
     view: QuestionView,
     probabilities: List[float],
+    read_probabilities: List[float],
     mass: float,
     question_id: str,
-    applied: Mode,
+    applied: str,
+    fingerprint: str,
     reads: Optional[List[SystemOneRead]],
 ):
-    if not all(math.isfinite(value) for value in [*probabilities, mass]):
+    if not all(
+        math.isfinite(value) for value in [*probabilities, *read_probabilities, mass]
+    ):
         # A server fault, reported as 500 rather than as a client error.
         raise RuntimeError(f"question {question_id!r} scored non-finite values")
-    extensions = {"x_label_mass": mass, "x_calibration": applied, "x_reads": reads}
+    extensions = {
+        "x_label_mass": mass,
+        "x_read_probabilities": dict(zip(view.names, read_probabilities)),
+        "x_calibration": applied,
+        "x_fingerprint": fingerprint,
+        "x_reads": reads,
+    }
     # Reported as scored, like /v1/decisions, and normalized only for confidence.
     if view.kind == "yes_no":
         return SystemOneNoulAnswer(noul=probabilities[0], **extensions)
@@ -741,6 +768,23 @@ def _answer(
         legend=_legend(view),
         probabilities=probabilities_by_name,
         **extensions,
+    )
+
+
+def _checkpoint_answer(
+    view: QuestionView, probabilities: List[float], question_id: str
+):
+    """An answer of a decision or joint schema checkpoint, read once and never
+    calibrated; its extension fields are left out of the response."""
+    return _answer(
+        view=view,
+        probabilities=probabilities,
+        read_probabilities=probabilities,
+        mass=1.0,
+        question_id=question_id,
+        applied="none",
+        fingerprint="",
+        reads=None,
     )
 
 
@@ -786,7 +830,9 @@ def _check_legend(question_id: str, view: QuestionView) -> None:
         legend=_legend(view),
         probabilities={},
         x_label_mass=0.0,
-        x_calibration="raw",
+        x_read_probabilities={},
+        x_calibration="none",
+        x_fingerprint="",
     )
     response = SystemOneResponse(
         model="", answers={question_id: answer}, usage=SystemOneUsage(input_tokens=0)

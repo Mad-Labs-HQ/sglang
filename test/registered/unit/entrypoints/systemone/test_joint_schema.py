@@ -18,6 +18,7 @@ from transformers import AutoTokenizer
 from sglang.srt.entrypoints import http_server
 from sglang.srt.entrypoints.openai.protocol import DecisionRequest
 from sglang.srt.entrypoints.openai.serving_decisions import OpenAIServingDecisions
+from sglang.srt.entrypoints.systemone.calibration import BUILTIN_READS_CONFIG
 from sglang.srt.entrypoints.systemone.joint_schema import encode_joint_schema
 from sglang.srt.entrypoints.systemone.protocol import SystemOneRequest
 from sglang.srt.entrypoints.systemone.serving import SystemOneServing, _read_image
@@ -160,7 +161,14 @@ def _handler(manager, serving_class=SystemOneServing):
         _prompt_text_round_trip_is_lossy=False,
         reasoning_parser=None,
     )
-    return serving_class(chat_serving)
+    if serving_class is not SystemOneServing:
+        return serving_class(chat_serving)
+    return serving_class(
+        chat_serving,
+        reads_config=BUILTIN_READS_CONFIG,
+        model="served-model",
+        model_revision=None,
+    )
 
 
 def _softmax(values):
