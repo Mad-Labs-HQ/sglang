@@ -17,8 +17,15 @@ from sglang.srt.entrypoints.openai.serving_decisions import (
     PROMPT_FORMAT_VERSION,
     OpenAIServingDecisions,
     _decision_view,
-    _encode_labels,
-    _render_question,
+    encode_labels,
+    render_question,
+)
+from sglang.srt.entrypoints.systemone.calibration import (
+    BatchPriorOff,
+    CalibrationConfig,
+    LabelFreeConfig,
+    combine_reads,
+    read_log_probabilities,
 )
 from sglang.srt.entrypoints.systemone.protocol import SystemOneRequest
 from sglang.srt.entrypoints.systemone.serving import (
@@ -85,6 +92,7 @@ def _handler(
     reasoning_parser=None,
     lossy=False,
     serving_class=OpenAIServingDecisions,
+    calibration=None,
 ):
     """Build the handler over the chat serving state the server builds at startup."""
     template = manager.tokenizer.chat_template
@@ -110,6 +118,8 @@ def _handler(
         _prompt_text_round_trip_is_lossy=lossy,
         reasoning_parser=reasoning_parser,
     )
+    if serving_class is SystemOneServing:
+        return serving_class(chat_serving, calibration=calibration)
     return serving_class(chat_serving)
 
 
@@ -277,7 +287,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
             "yes_no": ["yes", "no"],
         }
         for question_id, lines in PROMPT_FIXTURES[PROMPT_FORMAT_VERSION].items():
-            rendered = _render_question(
+            rendered = render_question(
                 text=text,
                 view=_decision_view(_by_id(request, question_id)),
                 labels=labels[question_id],
@@ -324,7 +334,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
             ),
         }
         for question_id, (labels, lines) in cases.items():
-            rendered = _render_question(
+            rendered = render_question(
                 text="s", view=_view(systemone.questions[question_id]), labels=labels
             )
             self.assertEqual(rendered, "\n".join(["s", "", *lines]))
@@ -362,7 +372,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
                     text = self.tokenizer.decode(prompt)
                     for question_labels, question_ids in zip(labels, label_ids):
                         self.assertEqual(
-                            _encode_labels(
+                            encode_labels(
                                 tokenizer=self.tokenizer,
                                 prompt=text,
                                 prompt_ids=prompt,
@@ -402,7 +412,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
             enable_thinking=False,
         )
         prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-        label_ids = _encode_labels(
+        label_ids = encode_labels(
             tokenizer=tokenizer,
             prompt=prompt,
             prompt_ids=prompt_ids,
@@ -421,7 +431,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
         prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
         added_tokens = {i: t for t, i in tokenizer.get_added_vocab().items()}
         self.assertEqual(
-            _encode_labels(
+            encode_labels(
                 tokenizer=tokenizer,
                 prompt=prompt,
                 prompt_ids=prompt_ids,
@@ -433,7 +443,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
 
     def test_labels_must_be_distinct_tokens(self):
         with self.assertRaisesRegex(ValueError, "label 'B' is not one distinct"):
-            _encode_labels(
+            encode_labels(
                 tokenizer=UnknownTokenizer(),
                 prompt="p",
                 prompt_ids=[0],
@@ -443,11 +453,12 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
 
     async def test_questions_yield_to_other_requests(self):
         noul = {"type": "noul", "instructions": "x"}
-        for route, handler, request in (
+        for route, handler, request, encoder in (
             (
                 "decisions",
                 _handler(ScoringManager(self.tokenizer)),
                 _request("s", {q: _question("yes_no") for q in "abc"}),
+                "_encode_question",
             ),
             (
                 "systemone",
@@ -455,11 +466,12 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
                     ScoringManager(self.tokenizer), serving_class=SystemOneServing
                 ),
                 _systemone_request({q: noul for q in "abc"}),
+                "_encode_read",
             ),
         ):
             with self.subTest(route):
                 events = []
-                encode = handler._encode_question
+                encode = getattr(handler, encoder)
 
                 def recorded(**kwargs):
                     events.append("encode")
@@ -470,7 +482,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
                         events.append("other")
                         await asyncio.sleep(0)
 
-                handler._encode_question = recorded
+                setattr(handler, encoder, recorded)
                 other = asyncio.create_task(other_request())
                 response = await handler.handle_request(request, None)
                 await other
@@ -805,7 +817,7 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
         prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         self.assertIn(prompt_ids[-1], added_tokens)
         self.assertEqual(
-            _encode_labels(
+            encode_labels(
                 tokenizer=self.tokenizer,
                 prompt=prompt,
                 prompt_ids=prompt_ids,
@@ -999,7 +1011,8 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
         )
 
         urgent = body["answers"]["urgent"]
-        self.assertEqual(set(urgent), {"type", "noul", "x_label_mass"})
+        self.assertEqual(set(urgent), {"type", "noul", "x_label_mass", "x_calibration"})
+        self.assertEqual(urgent["x_calibration"], "raw")
         yes_no = manager.logprobs[self.tokenizer.convert_tokens_to_ids(["yes", "no"])]
         torch.testing.assert_close(
             torch.tensor(urgent["noul"], dtype=torch.float64),
@@ -1008,7 +1021,15 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
 
         team = body["answers"]["team"]
         self.assertEqual(
-            set(team), {"type", "choice", "confidence", "probabilities", "x_label_mass"}
+            set(team),
+            {
+                "type",
+                "choice",
+                "confidence",
+                "probabilities",
+                "x_label_mass",
+                "x_calibration",
+            },
         )
         self.assertEqual(list(team["probabilities"]), ["billing", "technical", "sales"])
         self.assertEqual(
@@ -1021,7 +1042,15 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
         mood = body["answers"]["mood"]
         self.assertEqual(
             set(mood),
-            {"type", "score", "confidence", "legend", "probabilities", "x_label_mass"},
+            {
+                "type",
+                "score",
+                "confidence",
+                "legend",
+                "probabilities",
+                "x_label_mass",
+                "x_calibration",
+            },
         )
         self.assertEqual(mood["legend"], {"0": "Calm", "1": "Civil", "2": legend_level})
         self.assertEqual(list(mood["probabilities"]), ["0", "1", "2"])
@@ -1106,6 +1135,8 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
                 probabilities=[0.3] * (2 if question_id == "urgent" else 3),
                 mass=0.9,
                 question_id=question_id,
+                applied="raw",
+                reads=None,
             )
             for question_id, question in questions.items()
         }
@@ -1301,6 +1332,102 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
                         json.loads(response.body)["message"],
                     )
                     self.assertEqual(manager.requests, [])
+
+    def _calibrated(self, manager=None, **label_free):
+        fields = dict(
+            choice_rotations=3,
+            choice_name_variants=True,
+            noul_orders=2,
+            noul_case_variants=True,
+            batch_prior=BatchPriorOff(),
+        )
+        fields.update(label_free)
+        config = CalibrationConfig(
+            default_mode="label_free",
+            label_free=LabelFreeConfig(**fields),
+            fitted=None,
+        )
+        return self._serving(manager, calibration=config)
+
+    async def test_label_free_answers_combine_their_reads(self):
+        manager = ScoringManager(self.tokenizer)
+        request = _systemone_request(
+            {
+                "urgent": {"type": "noul", "instructions": "Needs an answer today"},
+                "team": {
+                    "type": "choice",
+                    "criteria": {"billing": None, "technical": "Bugs", "sales": None},
+                },
+                "mood": {"type": "score", "criteria": ["Calm", "Angry"]},
+            },
+            x_return_reads=True,
+        )
+        response = await self._calibrated(manager).handle_request(request, None)
+        self.assertEqual(response.status_code, 200)
+        # Two noul orders, three rotations, one score read, in one scoring call.
+        self.assertEqual(len(manager.requests), 1)
+        self.assertEqual(len(manager.requests[0].input_ids), 6)
+        answers = json.loads(response.body)["answers"]
+        for question_id, answer in answers.items():
+            with self.subTest(question_id):
+                self.assertEqual(answer["x_calibration"], "label_free")
+                names = answer["x_reads"][0]["order"]
+                log_q = combine_reads(
+                    [
+                        read_log_probabilities([read["logprobs"][n] for n in names])
+                        for read in answer["x_reads"]
+                    ]
+                )
+                expected = [math.exp(v) for v in log_q]
+                if question_id == "urgent":
+                    self.assertAlmostEqual(answer["noul"], expected[0])
+                else:
+                    self.assertEqual(list(answer["probabilities"]), names)
+                    for got, want in zip(answer["probabilities"].values(), expected):
+                        self.assertAlmostEqual(got, want)
+        urgent, team = answers["urgent"]["x_reads"], answers["team"]["x_reads"]
+        self.assertEqual([r["order"] for r in urgent], [["yes", "no"], ["no", "yes"]])
+        self.assertEqual(urgent[0]["texts"]["yes"], ["yes", "Yes", "YES"])
+        self.assertEqual(
+            [r["order"] for r in team],
+            [
+                ["billing", "technical", "sales"],
+                ["technical", "sales", "billing"],
+                ["sales", "billing", "technical"],
+            ],
+        )
+        self.assertEqual(team[0]["texts"]["billing"][0], "A")
+        self.assertEqual(team[1]["texts"]["billing"][0], "C")
+        # The reversed noul read asks for no before yes.
+        prompts = [self.tokenizer.decode(ids) for ids in manager.requests[0].input_ids]
+        self.assertIn("Answer with no or yes only.", prompts[1])
+        self.assertIn("Answer with yes or no only.", prompts[0])
+
+    async def test_raw_requests_are_unchanged_by_a_calibration_config(self):
+        request = _systemone_request(
+            {"q": {"type": "choice", "criteria": {"a": None, "b": None}}},
+            x_calibration="raw",
+        )
+        bodies = []
+        for serving in (self._serving(), self._calibrated()):
+            response = await serving.handle_request(request, None)
+            self.assertEqual(response.status_code, 200)
+            bodies.append(json.loads(response.body))
+        self.assertEqual(bodies[0], bodies[1])
+
+    async def test_calibration_modes_need_a_config(self):
+        question = {"q": {"type": "noul", "instructions": "x"}}
+        for serving, mode, message in (
+            (self._serving(), "label_free", "--decision-calibration-config"),
+            (self._calibrated(), "fitted", "needs fitted profiles"),
+        ):
+            with self.subTest(mode):
+                request = _systemone_request(question, x_calibration=mode)
+                response = await serving.handle_request(request, None)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(message, json.loads(response.body)["message"])
+        with self.assertRaises(ValidationError):
+            _systemone_request(question, x_calibration="calibrated")
 
     async def test_reasoning_refusals_apply(self):
         request = _systemone_request(

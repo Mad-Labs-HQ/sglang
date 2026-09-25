@@ -114,6 +114,9 @@ from sglang.srt.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
 )
 from sglang.srt.entrypoints.request_headers import apply_header_overrides
+from sglang.srt.entrypoints.systemone.calibration import (
+    load_config as load_calibration_config,
+)
 from sglang.srt.entrypoints.systemone.protocol import SystemOneRequest
 from sglang.srt.entrypoints.systemone.serving import SystemOneServing
 from sglang.srt.entrypoints.warmup import execute_warmups
@@ -354,7 +357,12 @@ async def lifespan(fast_api_app: FastAPI):
 
     # Initialize System One compatible decision handler
     fast_api_app.state.systemone_serving = SystemOneServing(
-        fast_api_app.state.openai_serving_chat
+        fast_api_app.state.openai_serving_chat,
+        calibration=load_calibration_config(
+            get_serving().decision_calibration_config,
+            model=get_model().model_path,
+            model_revision=get_model().revision,
+        ),
     )
 
     # Launch tool server

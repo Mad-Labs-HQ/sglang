@@ -209,6 +209,15 @@ class Serving(msgspec.Struct):
             type_parser=json.loads,
         ),
     ] = None
+    decision_calibration_config: A[
+        Optional[str],
+        "Path of a JSON calibration config for /v1/systemone: the default "
+        "calibration mode (raw, label_free, or fitted), the label-free reads, and "
+        "optional fitted profiles written by "
+        "`python -m sglang.srt.entrypoints.systemone.fit_calibration`. Without it, "
+        "answers are raw label probabilities. Profiles fitted for another model, "
+        "revision, or set of reads are refused at startup.",
+    ] = None
     strip_thinking_cache: A[
         bool,
         "Skip caching reasoning-model output (thinking + answer) in the radix tree on finish; keep only the prompt prefix. Opt-in: changes cache contents.",
