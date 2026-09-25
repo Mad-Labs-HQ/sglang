@@ -1,88 +1,109 @@
 # Optional NVMe PLE for Flash-Next
 
-`PENNY_PLE_BACKEND=ram` remains the default. Both Flash-Next launcher recipes
-also accept `nvme`; the 27B launcher is unchanged. This changes storage, not
-PLE precision or model weights. The FR-Spec recipe defaults to the qualified
-824,384-token KV cap; either recipe accepts a positive, page-64-aligned
-`MAX_TOTAL_TOKENS` override. The non-FR-Spec recipe leaves capacity automatic
-when the variable is unset. Startup logs remain the source of truth for actual
-capacity; the launcher does not silently shrink a requested cap.
+Qwen3.8-Flash-Next carries a 47.68 GiB fp8 PLE (per-layer embedding) lookup
+table. `--ple-offload-embedding` keeps it in pinned host RAM. This optional
+reader instead serves the table from a file on local NVMe: each lookup reads
+the exact rows through io_uring into two 16 MiB pinned staging buffers (plus
+a 32 MiB reader pool) and copies them to the GPU. PLE precision and model
+weights are unchanged. Page cache may still hold table pages, but the kernel
+can reclaim them. Decode is slower than with the pinned table; use this when
+host RAM, not speed, is the constraint.
 
-The FP8 PLE table occupies approximately47.68GiB when pinned in RAM. Streaming
-uses two16MiB row buffers, row-ID staging and a32MiB reader pool instead.
-Filesystem page cache may still occupy RAM, but can be reclaimed. This is not
-a promise of47GiB more `free` RAM or any decode-speed improvement.
+The reader is an SGLang general plugin (`sglang.srt.plugins` entry point
+`ssd_stream`). It changes nothing unless `PENNY_PLE_BACKEND=nvme` is set, so
+installing it cannot affect other models or RAM mode. Once that mode is
+selected, any failure stops the server; there is no fallback to RAM.
 
 ## Prepare once
 
-Use an existing complete local Flash-Next checkpoint. The preparation helper
-copies only PLE table bytes into a new directory and links ordinary assets to
-the original snapshot. Keep that original snapshot in place. Allow roughly48GiB
-of SSD space plus any mixed-shard retained tensors; no download or quantization
-is performed. The output directory must not already exist.
+The preparer copies only the PLE table bytes out of a complete local
+checkpoint into a new directory (`ple/layer-<n>.bin` plus `ssd-stream.json`).
+It symlinks every other asset to the original snapshot, which must stay in
+place and unchanged. Budget about 48 GiB of SSD space. The output directory
+must not already exist.
 
 ```bash
-PYTHON="$PWD/.venv/bin/python" bash tools/ple_nvme/install.sh
-.venv/bin/python scripts/pennyroyal/prepare_ple_nvme.py \
+CARGO_BUILD_JOBS=2 PYTHON="$PWD/.venv/bin/python" bash tools/ple_nvme/install.sh
+.venv/bin/python tools/ple_nvme/prepare_ple_nvme.py \
   --source /path/to/original-checkpoint \
   --output /path/on/local-nvme/flash-next-ple
 ```
 
-The installer needs Rust/Cargo and uv. It builds the optional reader with four
-jobs by default into `.ple-nvme`, not the main Python environment. Set
-`CARGO_BUILD_JOBS` and `PENNY_PLE_PLUGIN_DIR` to override these. It refuses an
-existing destination rather than overwriting an installed copy. Build tooling
-may download dependencies; inference needs no network access to this snapshot.
+`install.sh` needs Rust/Cargo and uv. It builds the reader (a PyO3 extension
+with an io_uring page reader) into `.ple-nvme/`, a separate import directory,
+and does not touch the Python environment. Set `PENNY_PLE_PLUGIN_DIR` to pick
+another directory. The installer will not overwrite an existing one. The
+overlay format is engine-independent: an overlay made for Pennyroyal v2.5.0
+works here unchanged.
 
-## Select in the existing recipe
+## Launch
 
-Retain the recipe's usual compiler-cache, NIXL, template and GPU settings:
+The launcher must do all of the following:
 
 ```bash
-export TARGET_MODEL=/path/to/original-checkpoint
-export PENNY_PLE_BACKEND=nvme
-export PENNY_PLE_NVME_MODEL=/path/on/local-nvme/flash-next-ple
-bash configs/pennyroyal/serve-flash-next-frspec.sh
+export PENNY_PLE_BACKEND=nvme SGLANG_PLUGINS=ssd_stream
+export PYTHONPATH="$REPO_ROOT/.ple-nvme:$REPO_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
+# CPU-only preflight: overlay <-> source identity, reader version, entry
+# point, source guard. Prints the manifest SHA-256 on success.
+PLE_MANIFEST_SHA="$(CUDA_VISIBLE_DEVICES='' "$PYTHON" \
+  "$REPO_ROOT/tools/ple_nvme/check_ple_nvme.py" \
+  --source /path/to/original-checkpoint --prepared /path/on/local-nvme/flash-next-ple)"
+sglang serve --model-path /path/on/local-nvme/flash-next-ple ...  # without --ple-offload-embedding
 ```
 
-Use `serve-flash-next.sh` for the no-FR-Spec variant. Choose `ram` to return to
-the original checkpoint path and pinned-table arguments. No automatic fallback
-occurs when NVMe is explicitly selected. No NUMA or kernel policy is changed.
-Media preprocessing defaults to CPU; `SGLANG_MM_PREPROCESS_DEVICE=cuda:0` and
-`cuda:1` remain available when the chosen device is visible to the process.
-Online SM120 MXFP8 is independently opt-in with the literal setting
-`SGLANG_SM120_ONLINE_MXFP8=true`; its default is `false`.
-The optional reader is imported only in NVMe mode; its registration also requires
-the explicit mode, protecting RAM/27B startup from plugin auto-discovery.
-The launcher requires Pennyroyal adapter build `0.2.0+pennyroyal2`; older local
-adapter builds are rejected because they lack the complete hook-application guard.
+When `--model-path` points at the prepared overlay, the reader's
+`ServerArgs.from_cli_args` hook forces `ple_offload_embedding=False`. It then
+SHA-256s the whole table (51.2 GB, one sequential read) before any worker
+starts.
 
-The launcher checks source compatibility and source/overlay identity. Server
-startup hashes the external PLE table before workers start; allow time for this
-sequential read. An invalid artifact or incompatible runtime fails startup.
-NVMe uses a separate NIXL namespace carrying its manifest identity; old caches
-are neither deleted nor modified. The backing table and source snapshot must
-remain immutable while serving. Place the table on local SSD storage. Sharing a
-device with NIXL introduces possible I/O contention.
+Never serve the overlay without the reader active. If `PENNY_PLE_BACKEND=nvme`
+is missing, or `SGLANG_PLUGINS` omits `ssd_stream`, SGLang does not detect the
+missing PLE weights. For a bf16 `--dtype` it pins an uninitialised 47.68 GiB
+table and serves garbage PLE rows. The launch steps above prevent this in the
+launcher, but nothing checks a manual launch.
+
+Keep the table and the source snapshot immutable while serving. If the
+NIXL/HiCache L3 namespace is keyed on the PLE backend, key it on the manifest
+SHA as well.
+
+## Source guard
+
+The reader registers its hooks only when every SGLang module listed in
+`ssd_stream/src/sglang_ssd_stream/pennyroyal-source.json` is byte-identical to
+the copy the adapter was reviewed against. That copy is currently
+`madlabs/systemone-prod@d18f27429b`. If a rebase changes one of those modules,
+NVMe startup and `tests/test_source_guard.py` fail, and nothing runs
+unguarded. To accept the new code:
+
+1. Review `qwen4.py`, `graph.py`, `config.py`, `offload.py` and `backend.py`
+   against the changed modules.
+2. Run `python tools/ple_nvme/refresh_source_guard.py --source madlabs/systemone-prod@<sha>`.
+3. Bump the `+systemoneN` version in `pyproject.toml`, `Cargo.toml`,
+   `__init__.py`, `check_ple_nvme.py` and `tests/test_pennyroyal.py`.
+4. Reinstall into a fresh `PENNY_PLE_PLUGIN_DIR`.
+
+## Tests
+
+```bash
+PYTHONPATH="$PWD/.ple-nvme:$PWD/python" .venv/bin/python -m pytest \
+  tools/ple_nvme/tests tools/ple_nvme/ssd_stream/tests
+```
+
+`ssd_stream/tests/gpu_smoke.py` needs a GPU and a prepared table.
 
 ## Source and limits
 
 `ssd_stream/` is an attributed adaptation of Garner McCloud's
-[SSD Stream v0.2.0](https://github.com/garnermccloud/sglang-ssd-stream/tree/176a522ef9d6dbb5056ae1f467fe49af0f1258a5),
-Apache-2.0, retaining its license. AntigravityAI's
-[Pennyroyal field report](https://github.com/jpezzulli/sglang-rtxpro6000/issues/2)
-established prior integration against Penny v2.3.0. Its later NVFP4-pinned PLE
-branch is not this FP8 streaming path.
+[SSD Stream v0.2.0](https://github.com/garnermccloud/sglang-ssd-stream/tree/176a522ef9d6dbb5056ae1f467fe49af0f1258a5)
+(Apache-2.0; its license is retained). It came here from Pennyroyal v2.5.0
+(jpezzulli/sglang-rtxpro6000, commits 97871a356, 435023d4a and 239312931).
+The reader, gather and graph adapter are unchanged from Pennyroyal. This port
+changes only the source guard, the package version, file locations and the
+tests that needed Pennyroyal's launcher. The upstream CLI runtime installer
+is not exposed, and no replacement QSA/MTP runtime is included.
 
-The reader, gather implementation and graph adapter are unchanged from that
-release. Local changes are opt-in/fail-loud registration, exact Penny source
-guards, payload checksum validation and launcher/artifact preparation. The
-upstream CLI runtime installer is not exposed by this package; no replacement
-QSA/MTP runtime payload is included. The adapter retains Penny's hash calculation
-but replaces the pinned-table gather with SSD row staging.
-
-This integration is limited to the qualified TP1 Flash-Next configuration on
-Linux x86_64 with Python3.12. It does not claim support for TP2, CPU expert
-offload, prefill graphs, or alternate speculative modes. NVMe reduced fixed host
-residency in qualification, but measured decode throughput was lower than RAM;
-it is a capacity/host-pressure option, not a speed-neutral default.
+Pennyroyal qualified only TP1 Flash-Next on Linux x86_64 with Python 3.12. TP2,
+CPU expert offload, prefill CUDA graphs and other speculative modes are
+unsupported. Qwen4-Exp keeps prefill CUDA graphs disabled by default, and the
+reader stages rows only for decode/verify graph replay, so do not force
+`--cuda-graph-backend-prefill` on.

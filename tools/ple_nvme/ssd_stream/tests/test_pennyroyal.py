@@ -1,8 +1,5 @@
 import hashlib
-import os
-import subprocess
 from collections import defaultdict
-from pathlib import Path
 
 import pytest
 from sglang.srt.plugins.hook_registry import HookRegistry
@@ -25,7 +22,7 @@ REQUIRED_HOOK_TARGETS = (
 
 
 def test_corrected_adapter_version_is_explicit():
-    assert __version__ == "0.2.0+pennyroyal2"
+    assert __version__ == "0.2.0+systemone1"
 
 
 @pytest.fixture
@@ -134,45 +131,3 @@ def test_required_hook_enforcement_is_idempotent(
     assert set(applied) == set(REQUIRED_HOOK_TARGETS)
     assert len(applied) == len(REQUIRED_HOOK_TARGETS)
 
-
-def test_ram_launcher_helper_preserves_arguments():
-    repo = Path(__file__).resolve().parents[4]
-    helper = repo / "configs/pennyroyal/ple-backend.sh"
-    env = dict(
-        os.environ,
-        PENNY_PLE_BACKEND="ram",
-        TARGET_MODEL="original",
-        PYTHONPATH="sentinel",
-    )
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1"; printf "%s\\n" "$TARGET_MODEL" "$PYTHONPATH" "${PLE_ARGS[*]}" "${#PLE_NAMESPACE_ARGS[@]}"',
-            "bash",
-            str(helper),
-        ],
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == [
-        "original",
-        "sentinel",
-        "--ple-offload-embedding",
-        "0",
-    ]
-
-
-def test_invalid_launcher_mode_fails():
-    repo = Path(__file__).resolve().parents[4]
-    helper = repo / "configs/pennyroyal/ple-backend.sh"
-    result = subprocess.run(
-        ["bash", "-c", 'source "$1"', "bash", str(helper)],
-        env=dict(os.environ, PENNY_PLE_BACKEND="typo"),
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode != 0
