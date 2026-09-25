@@ -38,6 +38,7 @@ from sglang.srt.entrypoints.systemone.calibration_fit import (
     expected_calibration_error,
     fit_platt,
     fit_temperature,
+    nll,
     quadratic_weighted_kappa,
     ranked_probability_score,
     selective_accuracy,
@@ -198,6 +199,21 @@ class TestFitting(CustomTestCase):
         params = fit_platt(log_q, gold)
         self.assertAlmostEqual(params.a, 0.5, delta=0.1)
         self.assertAlmostEqual(params.b, 0.7, delta=0.15)
+
+    def test_platt_fit_converges_from_saturated_predictions(self):
+        # Every answer says yes with high confidence while half are no: undamped
+        # Newton steps from there diverged to huge parameters.
+        rng = random.Random(2)
+        log_q, gold = [], []
+        for _ in range(300):
+            z = rng.uniform(2.0, 7.0)
+            log_q.append(log_normalize([z, 0.0]))
+            gold.append(rng.randrange(2))
+        params = fit_platt(log_q, gold)
+        self.assertLess(abs(params.a), 1.0)
+        fitted = [apply_params(params, row) for row in log_q]
+        self.assertLess(nll(fitted, gold), math.log(2) + 0.01)
+        self.assertLess(nll(fitted, gold), nll(log_q, gold))
 
     def test_apply_params(self):
         log_q = log_normalize([math.log(0.9), math.log(0.1)])
