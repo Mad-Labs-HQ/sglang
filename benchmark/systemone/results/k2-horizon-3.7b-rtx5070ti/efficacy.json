@@ -417,7 +417,7 @@
           "decidable_at_5pct_error": 0.2,
           "ece": 0.07277841940704273,
           "auroc": 0.8727514661672663,
-          "fit": "PlattParams(a=1.0921624392967357, b=1.812647863442353)"
+          "fit": "platt"
         },
         "label_free": {
           "accuracy": 0.8033333333333333,
@@ -436,7 +436,7 @@
           "decidable_at_5pct_error": 0.36333333333333334,
           "ece": 0.05987311557240987,
           "auroc": 0.8905918880291755,
-          "fit": "PlattParams(a=1.29710748508955, b=0.9644852249269267)"
+          "fit": "platt"
         },
         "case variants only": {
           "accuracy": 0.6933333333333334,
@@ -503,7 +503,7 @@
           "decidable_at_5pct_error": 0.4266666666666667,
           "ece": 0.07888973291162286,
           "auroc": 0.8960622914349277,
-          "fit": "PlattParams(a=3.0381322036010174, b=4.149658927478165)"
+          "fit": "platt"
         },
         "label_free": {
           "accuracy": 0.8033333333333333,
@@ -522,7 +522,7 @@
           "decidable_at_5pct_error": 0.52,
           "ece": 0.07341516261340081,
           "auroc": 0.9061179087875417,
-          "fit": "PlattParams(a=3.1378681405194864, b=1.2540031206714448)"
+          "fit": "platt"
         },
         "case variants only": {
           "accuracy": 0.7633333333333333,
@@ -589,7 +589,7 @@
           "decidable_at_5pct_error": 1.0,
           "ece": 0.048260010615723756,
           "auroc": 0.991702371613059,
-          "fit": "PlattParams(a=1.7885365643630824, b=2.83794681996573)"
+          "fit": "platt"
         },
         "label_free": {
           "accuracy": 0.9733333333333334,
@@ -601,14 +601,14 @@
           "auroc": 0.9937239756200591
         },
         "label_free+fitted": {
-          "accuracy": 0.9666666666666667,
-          "nll": 0.09482373002837888,
-          "brier": 0.051923567424437635,
+          "accuracy": 0.9733333333333334,
+          "nll": 0.09109182218876737,
+          "brier": 0.04224616576999036,
           "selective_acc_50": 1.0,
           "decidable_at_5pct_error": 1.0,
-          "ece": 0.04430731965779815,
+          "ece": 0.04609356160313035,
           "auroc": 0.9937239756200591,
-          "fit": "PlattParams(a=2.0201372076028723, b=-0.5378828420958048)"
+          "fit": "temperature"
         },
         "case variants only": {
           "accuracy": 0.92,
@@ -667,13 +667,13 @@
           "ece": 0.04424671380320679
         },
         "raw+fitted": {
-          "accuracy": 0.89,
-          "nll": 0.3274963974202341,
-          "brier": 0.16641759125722472,
-          "selective_acc_50": 0.9933333333333333,
-          "decidable_at_5pct_error": 0.8266666666666667,
-          "ece": 0.05725482092713359,
-          "fit": "TemperatureParams(temperature=1.4312799693746145)"
+          "accuracy": 0.8966666666666666,
+          "nll": 0.30736631313705276,
+          "brier": 0.15850422739109096,
+          "selective_acc_50": 1.0,
+          "decidable_at_5pct_error": 0.8666666666666667,
+          "ece": 0.03939126419487393,
+          "fit": "vector"
         },
         "label_free": {
           "accuracy": 0.89,
@@ -684,13 +684,13 @@
           "ece": 0.04424671380320679
         },
         "label_free+fitted": {
-          "accuracy": 0.89,
-          "nll": 0.3274963974202341,
-          "brier": 0.16641759125722472,
-          "selective_acc_50": 0.9933333333333333,
-          "decidable_at_5pct_error": 0.8266666666666667,
-          "ece": 0.05725482092713359,
-          "fit": "TemperatureParams(temperature=1.4312799693746145)"
+          "accuracy": 0.8966666666666666,
+          "nll": 0.30736631313705276,
+          "brier": 0.15850422739109096,
+          "selective_acc_50": 1.0,
+          "decidable_at_5pct_error": 0.8666666666666667,
+          "ece": 0.03939126419487393,
+          "fit": "vector"
         },
         "name variants only": {
           "accuracy": 0.89,
@@ -745,13 +745,13 @@
           "ece": 0.20036598016547683
         },
         "raw+fitted": {
-          "accuracy": 0.46,
-          "nll": 1.4820378379032746,
-          "brier": 0.6918348487824406,
-          "selective_acc_50": 0.62,
-          "decidable_at_5pct_error": 0.0033333333333333335,
-          "ece": 0.06517272637691841,
-          "fit": "TemperatureParams(temperature=1.7581659269437493)"
+          "accuracy": 0.51,
+          "nll": 1.2904706832348094,
+          "brier": 0.6314801298650742,
+          "selective_acc_50": 0.6533333333333333,
+          "decidable_at_5pct_error": 0.02666666666666667,
+          "ece": 0.09290817515427982,
+          "fit": "vector"
         },
         "label_free": {
           "accuracy": 0.46,
@@ -762,13 +762,13 @@
           "ece": 0.20036598016547683
         },
         "label_free+fitted": {
-          "accuracy": 0.46,
-          "nll": 1.4820378379032746,
-          "brier": 0.6918348487824406,
-          "selective_acc_50": 0.62,
-          "decidable_at_5pct_error": 0.0033333333333333335,
-          "ece": 0.06517272637691841,
-          "fit": "TemperatureParams(temperature=1.7581659269437493)"
+          "accuracy": 0.51,
+          "nll": 1.2904706832348094,
+          "brier": 0.6314801298650742,
+          "selective_acc_50": 0.6533333333333333,
+          "decidable_at_5pct_error": 0.02666666666666667,
+          "ece": 0.09290817515427982,
+          "fit": "vector"
         },
         "name variants only": {
           "accuracy": 0.4666666666666667,
@@ -823,13 +823,13 @@
           "ece": 0.09834970973315858
         },
         "raw+fitted": {
-          "accuracy": 0.6,
-          "nll": 1.9784654267082085,
-          "brier": 0.575593834919719,
-          "selective_acc_50": 0.8,
-          "decidable_at_5pct_error": 0.0033333333333333335,
-          "ece": 0.09725400572621506,
-          "fit": "TemperatureParams(temperature=1.3580759186983042)"
+          "accuracy": 0.6433333333333333,
+          "nll": 1.7642157209932279,
+          "brier": 0.508076316997992,
+          "selective_acc_50": 0.8466666666666667,
+          "decidable_at_5pct_error": 0.15,
+          "ece": 0.07187924232651244,
+          "fit": "vector"
         },
         "label_free": {
           "accuracy": 0.6,
@@ -840,13 +840,13 @@
           "ece": 0.09834970973315858
         },
         "label_free+fitted": {
-          "accuracy": 0.6,
-          "nll": 1.9784654267082085,
-          "brier": 0.575593834919719,
-          "selective_acc_50": 0.8,
-          "decidable_at_5pct_error": 0.0033333333333333335,
-          "ece": 0.09725400572621506,
-          "fit": "TemperatureParams(temperature=1.3580759186983042)"
+          "accuracy": 0.6433333333333333,
+          "nll": 1.7642157209932279,
+          "brier": 0.508076316997992,
+          "selective_acc_50": 0.8466666666666667,
+          "decidable_at_5pct_error": 0.15,
+          "ece": 0.07187924232651244,
+          "fit": "vector"
         },
         "name variants only": {
           "accuracy": 0.5966666666666667,
@@ -904,16 +904,16 @@
           "qwk": 0.2680099857346647
         },
         "raw+fitted": {
-          "accuracy": 0.2733333333333333,
-          "nll": 1.5413819214417117,
-          "brier": 0.7737503147929687,
+          "accuracy": 0.3466666666666667,
+          "nll": 1.4153646289836728,
+          "brier": 0.7435955038790293,
           "selective_acc_50": 0.34,
           "decidable_at_5pct_error": 0.0,
-          "ece": 0.032309236838456115,
-          "mae_expected_score": 1.0620739778853059,
-          "rps": 0.16925180181037877,
-          "qwk": 0.2680099857346647,
-          "fit": "TemperatureParams(temperature=3.7133012787693276)"
+          "ece": 0.0799283311688276,
+          "mae_expected_score": 0.9423448987839974,
+          "rps": 0.1481409520663453,
+          "qwk": 0.5328891090000452,
+          "fit": "vector"
         },
         "label_free": {
           "accuracy": 0.2733333333333333,
@@ -927,16 +927,16 @@
           "qwk": 0.2680099857346647
         },
         "label_free+fitted": {
-          "accuracy": 0.2733333333333333,
-          "nll": 1.5413819214417117,
-          "brier": 0.7737503147929687,
+          "accuracy": 0.3466666666666667,
+          "nll": 1.4153646289836728,
+          "brier": 0.7435955038790293,
           "selective_acc_50": 0.34,
           "decidable_at_5pct_error": 0.0,
-          "ece": 0.032309236838456115,
-          "mae_expected_score": 1.0620739778853059,
-          "rps": 0.16925180181037877,
-          "qwk": 0.2680099857346647,
-          "fit": "TemperatureParams(temperature=3.7133012787693276)"
+          "ece": 0.0799283311688276,
+          "mae_expected_score": 0.9423448987839974,
+          "rps": 0.1481409520663453,
+          "qwk": 0.5328891090000452,
+          "fit": "vector"
         },
         "batch_prior=1.0 only": {
           "accuracy": 0.27,
@@ -993,7 +993,7 @@
           "mae_expected_score": 1.1797541814411083,
           "rps": 0.19320151227869012,
           "qwk": 0.1830990110806625,
-          "fit": "TemperatureParams(temperature=5.2803201161730176)"
+          "fit": "temperature"
         },
         "label_free": {
           "accuracy": 0.27666666666666667,
@@ -1016,7 +1016,7 @@
           "mae_expected_score": 1.1797541814411083,
           "rps": 0.19320151227869012,
           "qwk": 0.1830990110806625,
-          "fit": "TemperatureParams(temperature=5.2803201161730176)"
+          "fit": "temperature"
         },
         "batch_prior=1.0 only": {
           "accuracy": 0.24666666666666667,

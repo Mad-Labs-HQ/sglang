@@ -58,17 +58,17 @@ Chosen: `{"noul_case_variants": true, "choice_name_variants": false, "noul_order
 | ag_news_sports | noul   | batch_prior=1.0 only  | 0.977 | 0.110 | 0.185 | 0.068 | 0.967       | 1.000        | AUROC 0.994                   |
 | ag_news_sports | noul   | content_free=1.0 only | 0.983 | 0.056 | 0.112 | 0.041 | 0.973       | 1.000        | AUROC 0.994                   |
 | ag_news        | choice | raw                   | 0.840 | 0.124 | 0.788 | 0.275 | 0.920       | 0.400        |                               |
-| ag_news        | choice | raw+fitted            | 0.840 | 0.045 | 0.477 | 0.252 | 0.927       | 0.357        |                               |
+| ag_news        | choice | raw+fitted            | 0.880 | 0.043 | 0.370 | 0.192 | 0.973       | 0.740        |                               |
 | ag_news        | choice | label_free            | 0.840 | 0.124 | 0.788 | 0.275 | 0.920       | 0.400        |                               |
-| ag_news        | choice | label_free+fitted     | 0.840 | 0.045 | 0.477 | 0.252 | 0.927       | 0.357        |                               |
+| ag_news        | choice | label_free+fitted     | 0.880 | 0.043 | 0.370 | 0.192 | 0.973       | 0.740        |                               |
 | ag_news        | choice | name variants only    | 0.840 | 0.124 | 0.788 | 0.275 | 0.920       | 0.400        |                               |
 | ag_news        | choice | reads=8 only          | 0.810 | 0.124 | 0.768 | 0.308 | 0.940       | 0.333        |                               |
 | ag_news        | choice | batch_prior=1.0 only  | 0.850 | 0.110 | 0.739 | 0.258 | 0.947       | 0.483        |                               |
 | ag_news        | choice | content_free=1.0 only | 0.783 | 0.161 | 1.179 | 0.385 | 0.893       | 0.267        |                               |
 | emotion        | choice | raw                   | 0.500 | 0.275 | 2.303 | 0.798 | 0.607       | 0.003        |                               |
-| emotion        | choice | raw+fitted            | 0.500 | 0.085 | 1.440 | 0.682 | 0.600       | 0.000        |                               |
+| emotion        | choice | raw+fitted            | 0.537 | 0.084 | 1.232 | 0.606 | 0.700       | 0.033        |                               |
 | emotion        | choice | label_free            | 0.500 | 0.275 | 2.303 | 0.798 | 0.607       | 0.003        |                               |
-| emotion        | choice | label_free+fitted     | 0.500 | 0.085 | 1.440 | 0.682 | 0.600       | 0.000        |                               |
+| emotion        | choice | label_free+fitted     | 0.537 | 0.084 | 1.232 | 0.606 | 0.700       | 0.033        |                               |
 | emotion        | choice | name variants only    | 0.487 | 0.283 | 2.303 | 0.798 | 0.607       | 0.003        |                               |
 | emotion        | choice | reads=8 only          | 0.527 | 0.269 | 1.828 | 0.735 | 0.633       | 0.000        |                               |
 | emotion        | choice | batch_prior=1.0 only  | 0.463 | 0.295 | 2.252 | 0.824 | 0.593       | 0.010        |                               |
@@ -82,14 +82,14 @@ Chosen: `{"noul_case_variants": true, "choice_name_variants": false, "noul_order
 | banking77      | choice | batch_prior=1.0 only  | 0.093 | 0.104 | 4.694 | 0.980 | 0.160       | 0.023        |                               |
 | banking77      | choice | content_free=1.0 only | 0.090 | 0.189 | 4.897 | 1.005 | 0.167       | 0.020        |                               |
 | sst5           | score  | raw                   | 0.220 | 0.766 | 5.092 | 1.530 | 0.280       | 0.007        | MAE 1.278 RPS 0.316 QWK 0.000 |
-| sst5           | score  | raw+fitted            | 0.220 | 0.063 | 1.604 | 0.798 | 0.307       | 0.007        | MAE 1.148 RPS 0.187 QWK 0.000 |
+| sst5           | score  | raw+fitted            | 0.323 | 0.037 | 1.507 | 0.765 | 0.313       | 0.010        | MAE 1.065 RPS 0.170 QWK 0.378 |
 | sst5           | score  | label_free            | 0.220 | 0.766 | 5.092 | 1.530 | 0.280       | 0.007        | MAE 1.278 RPS 0.316 QWK 0.000 |
-| sst5           | score  | label_free+fitted     | 0.220 | 0.063 | 1.604 | 0.798 | 0.307       | 0.007        | MAE 1.148 RPS 0.187 QWK 0.000 |
+| sst5           | score  | label_free+fitted     | 0.323 | 0.037 | 1.507 | 0.765 | 0.313       | 0.010        | MAE 1.065 RPS 0.170 QWK 0.378 |
 | sst5           | score  | batch_prior=1.0 only  | 0.237 | 0.230 | 1.703 | 0.859 | 0.267       | 0.000        | MAE 1.040 RPS 0.180 QWK 0.265 |
 | sst5           | score  | content_free=1.0 only | 0.270 | 0.202 | 1.808 | 0.849 | 0.300       | 0.003        | MAE 1.073 RPS 0.181 QWK 0.230 |
 | yelp           | score  | raw                   | 0.247 | 0.265 | 1.994 | 0.919 | 0.267       | 0.017        | MAE 1.141 RPS 0.207 QWK 0.144 |
-| yelp           | score  | raw+fitted            | 0.247 | 0.035 | 1.578 | 0.788 | 0.300       | 0.003        | MAE 1.164 RPS 0.189 QWK 0.144 |
+| yelp           | score  | raw+fitted            | 0.317 | 0.073 | 1.514 | 0.766 | 0.367       | 0.010        | MAE 1.107 RPS 0.180 QWK 0.272 |
 | yelp           | score  | label_free            | 0.247 | 0.265 | 1.994 | 0.919 | 0.267       | 0.017        | MAE 1.141 RPS 0.207 QWK 0.144 |
-| yelp           | score  | label_free+fitted     | 0.247 | 0.035 | 1.578 | 0.788 | 0.300       | 0.003        | MAE 1.164 RPS 0.189 QWK 0.144 |
+| yelp           | score  | label_free+fitted     | 0.317 | 0.073 | 1.514 | 0.766 | 0.367       | 0.010        | MAE 1.107 RPS 0.180 QWK 0.272 |
 | yelp           | score  | batch_prior=1.0 only  | 0.310 | 0.118 | 1.581 | 0.789 | 0.353       | 0.007        | MAE 1.088 RPS 0.184 QWK 0.311 |
 | yelp           | score  | content_free=1.0 only | 0.210 | 0.500 | 2.653 | 1.125 | 0.240       | 0.000        | MAE 1.274 RPS 0.265 QWK 0.072 |

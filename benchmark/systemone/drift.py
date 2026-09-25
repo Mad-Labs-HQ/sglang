@@ -1,13 +1,13 @@
 """How much answers move between two runs of the same reads: batch and cache drift.
 
 Compares the answers ``verify_server.py check`` saved against the same answers
-recomputed from the reads ``collect.py`` saved, for the reads a label-free
-config makes. The two runs differ only in which requests shared a batch and
+recomputed from the reads ``collect.py`` saved, for the default reads of a
+reads config. The two runs differ only in which requests shared a batch and
 which prefixes came from the cache, so any difference is numerical drift.
 
     python benchmark/systemone/drift.py --run runs/k2-horizon-3.7b \\
         --served results/k2-horizon-3.7b-rtx5070ti/served_label_free.answers.jsonl \\
-        --config ../../examples/runtime/systemone/label_free.json \\
+        --config ../../examples/runtime/systemone/reads.json \\
         --out results/k2-horizon-3.7b-rtx5070ti/drift.md
 """
 
@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
     with open(args.config, "rb") as f:
-        label_free = decode_config(f.read()).label_free
+        label_free = decode_config(f.read()).default_reads
     chosen = {
         "noul_case_variants": label_free.noul_case_variants,
         "choice_name_variants": label_free.choice_name_variants,

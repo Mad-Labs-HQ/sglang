@@ -1,14 +1,15 @@
-"""Check what a server with a calibration config answers, end to end.
+"""Check what a server answers with client calibrations, end to end.
 
 ``export`` writes the fit half of every task as labeled rows for
-``python -m sglang.srt.entrypoints.systemone.fit_calibration``. ``check`` asks
-the server the test half in a calibration mode, recomputes every answer from
-its returned reads with the server's calibration config, reports the largest
+``python -m sglang.srt.entrypoints.systemone.fit_calibration``, with the task
+name as the question id. ``check`` asks the server the test half, attaching the
+calibration fitted for each task if a calibrations file is given, recomputes
+every answer from its returned reads and calibration, reports the largest
 difference, and scores the answers as served.
 
     python benchmark/systemone/verify_server.py export --rows 600 --out labeled_fit.jsonl
     python benchmark/systemone/verify_server.py check --url http://127.0.0.1:30000 \\
-        --config fitted.json --mode fitted --rows 600 --concurrency 8 --out served_fitted.md
+        --calibrations calibrations.json --rows 600 --concurrency 8 --out served_calibrated.md
 """
 
 import argparse
@@ -20,20 +21,14 @@ import requests
 from tasks import TASKS, load_task
 
 from sglang.srt.entrypoints.systemone.calibration import (
-    apply_params,
+    apply_calibration,
     combine_reads,
-    decode_config,
-    find_profile,
     read_log_probabilities,
 )
 from sglang.srt.entrypoints.systemone.calibration_fit import (
     expected_calibration_error,
     nll,
     top_label,
-)
-from sglang.srt.entrypoints.systemone.fit_calibration import (
-    KINDS,
-    question_signature_of,
 )
 
 
@@ -56,8 +51,8 @@ def export(args):
                     json.dumps(
                         {
                             "state": row["state"],
-                            "questions": {"q": row["question"]},
-                            "labels": {"q": gold_label(row)},
+                            "questions": {task: row["question"]},
+                            "labels": {task: gold_label(row)},
                         },
                         ensure_ascii=False,
                     )
@@ -72,8 +67,8 @@ def served_log_q(answer):
     return [math.log(max(p, 1e-300)) for p in answer["probabilities"].values()]
 
 
-def expected_log_q(config, mode, question, answer):
-    """The answer's log probabilities recomputed from its reads."""
+def expected_log_q(answer, calibration):
+    """The answer's log probabilities recomputed from its reads and calibration."""
     names = answer["x_reads"][0]["order"]
     log_q = combine_reads(
         [
@@ -81,44 +76,47 @@ def expected_log_q(config, mode, question, answer):
             for read in answer["x_reads"]
         ]
     )
-    if mode == "fitted":
-        profile = find_profile(
-            config.fitted,
-            KINDS[question["type"]],
-            len(names),
-            question_signature_of(question),
-        )
-        if profile is not None:
-            log_q = apply_params(profile.params, log_q)
+    if calibration is not None:
+        log_q = apply_calibration(calibration, log_q)
     return log_q
 
 
 def check(args):
-    with open(args.config, "rb") as f:
-        config = decode_config(f.read())
+    calibrations, read_setup = {}, None
+    if args.calibrations:
+        with open(args.calibrations) as f:
+            fitted = json.load(f)
+        calibrations, read_setup = fitted["calibrations"], fitted["read_setup"]
     session = requests.Session()
     lines = [
-        f"Served answers in mode `{args.mode}` on the test half.",
+        "Served answers on the test half"
+        + (f", calibrated by {args.calibrations}." if args.calibrations else "."),
         "",
-        "| task | acc | ECE | NLL | max abs diff vs reads |",
-        "| --- | --- | --- | --- | --- |",
+        "| task | acc | ECE | NLL | calibration | max abs diff vs reads |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     worst = 0.0
     answers_out = open(args.out.rsplit(".", 1)[0] + ".answers.jsonl", "w")
     for task in TASKS:
         rows = [r for r in load_task(task, args.rows) if r["split"] == "test"]
+        calibration = calibrations.get(task)
 
         def ask(row):
+            question = dict(row["question"])
+            if calibration is not None:
+                question["x_calibration"] = calibration
             body = {
                 "state": row["state"],
                 "model": "verify",
-                "questions": {"q": row["question"]},
-                "x_calibration": args.mode,
+                "questions": {task: question},
                 "x_return_reads": True,
             }
+            if read_setup is not None:
+                body["x_read_setup"] = read_setup
             response = session.post(f"{args.url}/v1/systemone", json=body, timeout=600)
-            response.raise_for_status()
-            return response.json()["answers"]["q"]
+            if response.status_code != 200:
+                raise RuntimeError(f"{response.status_code}: {response.text}")
+            return response.json()["answers"][task]
 
         with ThreadPoolExecutor(args.concurrency) as pool:
             answers = list(pool.map(ask, rows))
@@ -127,8 +125,8 @@ def check(args):
         values = [served_log_q(a) for a in answers]
         diff = max(
             abs(math.exp(s) - math.exp(e))
-            for row, a, v in zip(rows, answers, values)
-            for s, e in zip(v, expected_log_q(config, args.mode, row["question"], a))
+            for a, v in zip(answers, values)
+            for s, e in zip(v, expected_log_q(a, calibration))
         )
         worst = max(worst, diff)
         gold = [r["gold"] for r in rows]
@@ -139,10 +137,10 @@ def check(args):
             )
         else:
             ece = expected_calibration_error(confidence, correct)
-        applied = {a["x_calibration"] for a in answers}
+        applied = ", ".join(sorted({a["x_calibration"] for a in answers}))
         lines.append(
-            f"| {task} | {sum(correct) / len(correct):.3f} | {ece:.3f} | {nll(values, gold):.3f} "
-            f"| {diff:.2e} ({', '.join(sorted(applied))}) |"
+            f"| {task} | {sum(correct) / len(correct):.3f} | {ece:.3f} "
+            f"| {nll(values, gold):.3f} | {applied} | {diff:.2e} |"
         )
         print(lines[-1], flush=True)
     answers_out.close()
@@ -160,8 +158,10 @@ def main():
     p.add_argument("--out", required=True)
     p = sub.add_parser("check")
     p.add_argument("--url", required=True)
-    p.add_argument("--config", required=True)
-    p.add_argument("--mode", required=True, choices=["label_free", "fitted"])
+    p.add_argument(
+        "--calibrations",
+        help="fit tool output; the server's default reads, uncalibrated, when absent",
+    )
     p.add_argument("--rows", type=int, required=True)
     p.add_argument("--concurrency", type=int, required=True)
     p.add_argument("--out", required=True)
