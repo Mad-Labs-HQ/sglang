@@ -2,12 +2,13 @@
 
 A question is answered from one or more reads: prompts that show its options in
 some order and score some label tokens per option. A read setup chooses them:
-cyclic rotations of choice options, yes and no in both orders, and case or
-option-name variants of the labels. The raw setup is the single read of
-/v1/decisions. Reads are combined by geometric mean, and then a calibration the
-client fitted for that question, if the request carries one, is applied: a
-temperature, Platt scaling, or vector scaling. The server keeps no calibration
-state; a request says how to read and calibrate each question.
+orders of choice options (cyclic rotations or the rows of a Williams square),
+yes and no in both orders, and case or option-name variants of the labels. The
+raw setup is the single read of /v1/decisions. Reads are combined by geometric
+mean, and then a calibration the client fitted for that question, if the
+request carries one, is applied: a temperature, Platt scaling, or vector
+scaling. The server keeps no calibration state; a request says how to read and
+calibrate each question.
 
 Pure functions over plain floats, shared by the server, the fit tool, and the
 benchmarks in ``benchmark/systemone`` so all three compute the same numbers.
@@ -19,7 +20,18 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from typing import Annotated, Any, List, Mapping, Optional, Sequence, Tuple
+from functools import lru_cache
+from typing import (
+    Annotated,
+    Any,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import msgspec
 
@@ -28,14 +40,21 @@ import msgspec
 # any probability an answer reports.
 LOG_FLOOR = math.log(1e-12)
 
-# Rotations a request may ask for when no reads config sets a cap; the most the
-# benchmarks measured.
-BUILTIN_MAX_CHOICE_ROTATIONS = 8
+# Orders a choice question may be read in when no reads config sets a cap; the
+# most the benchmarks measured on large option lists.
+BUILTIN_MAX_CHOICE_ORDERS = 8
+
+ChoiceOrders = Literal["rotations", "williams"]
+# A number of orders, or "all": one per option, the whole rotation cycle or
+# Williams square.
+MaxOrders = Union[Annotated[int, msgspec.Meta(ge=1)], Literal["all"]]
 
 
 class ReadSetup(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
-    # Evenly spaced cyclic rotations of the options, identity first.
-    choice_rotations: Annotated[int, msgspec.Meta(ge=1)]
+    # How choice options are reordered across reads, the request order first.
+    choice_orders: ChoiceOrders
+    # How many orders a choice question is read in, at most its option count.
+    choice_max_orders: MaxOrders
     # Also score each choice option by the first token of its name.
     choice_name_variants: bool
     # 1 reads yes then no, 2 also reads no then yes.
@@ -46,7 +65,8 @@ class ReadSetup(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
 
 # The single read of /v1/decisions.
 RAW_READS = ReadSetup(
-    choice_rotations=1,
+    choice_orders="rotations",
+    choice_max_orders=1,
     choice_name_variants=False,
     noul_orders=1,
     noul_case_variants=False,
@@ -56,21 +76,26 @@ RAW_READS = ReadSetup(
 class ReadsConfig(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
     # Reads of requests that do not send x_read_setup, such as SDK clients.
     default_reads: ReadSetup
-    # The most choice rotations a request may ask for.
-    max_choice_rotations: Annotated[int, msgspec.Meta(ge=1)]
+    # The most orders any choice question may be read in.
+    max_choice_orders: Annotated[int, msgspec.Meta(ge=1)]
 
 
 # The reads of a server launched without --decision-reads-config.
 BUILTIN_READS_CONFIG = ReadsConfig(
-    default_reads=RAW_READS, max_choice_rotations=BUILTIN_MAX_CHOICE_ROTATIONS
+    default_reads=RAW_READS, max_choice_orders=BUILTIN_MAX_CHOICE_ORDERS
 )
 
 
 def decode_config(data: bytes) -> ReadsConfig:
     """Parse a reads config, checking what the types cannot."""
     config = msgspec.json.decode(data, type=ReadsConfig)
-    if config.default_reads.choice_rotations > config.max_choice_rotations:
-        raise ValueError("default_reads.choice_rotations is above max_choice_rotations")
+    # A number within the cap, so clients that cannot choose reads are never refused.
+    default_max = config.default_reads.choice_max_orders
+    if default_max == "all" or default_max > config.max_choice_orders:
+        raise ValueError(
+            "default_reads.choice_max_orders must be a number no larger than "
+            "max_choice_orders"
+        )
     return config
 
 
@@ -82,22 +107,36 @@ def load_config(path: Optional[str]) -> ReadsConfig:
         return decode_config(f.read())
 
 
+def choice_order_count(setup: ReadSetup, options: int) -> int:
+    """How many orders a choice question with this many options is read in."""
+    if setup.choice_max_orders == "all":
+        return options
+    return min(options, setup.choice_max_orders)
+
+
 def reads_fingerprint(
     kind: str,
+    options: int,
     setup: ReadSetup,
     model: str,
     model_revision: Optional[str],
     prompt_format_version: int,
 ) -> str:
-    """Identity of what a calibration for this kind of question was fitted on:
-    the model, the prompt wording, and the parts of the read setup that apply."""
+    """Identity of what a calibration for this question was fitted on: the model,
+    the prompt wording, and the reads it gets, however the read setup spells them."""
+    count = choice_order_count(setup, options)
     relevant = {
         "yes_no": [setup.noul_orders, setup.noul_case_variants],
-        "choice": [setup.choice_rotations, setup.choice_name_variants],
+        # One order is the request order, whatever the scheme.
+        "choice": [
+            setup.choice_orders if count > 1 else "identity",
+            count,
+            setup.choice_name_variants,
+        ],
         "score": [],
     }[kind]
     blob = json.dumps(
-        [model, model_revision, prompt_format_version, kind, relevant],
+        [model, model_revision, prompt_format_version, kind, options, relevant],
         separators=(",", ":"),
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
@@ -121,10 +160,12 @@ def plan_reads(kind: str, labels: Sequence[str], setup: ReadSetup) -> List[Read]
     """Reads of a question whose options carry these labels, identity first."""
     n = len(labels)
     if kind == "choice":
-        # A rotation relabels options by display position, so the labels stay put.
+        # Options move between reads; the labels stay with their positions.
         return [
-            Read(order=tuple((offset + i) % n for i in range(n)), labels=tuple(labels))
-            for offset in rotation_offsets(n, setup.choice_rotations)
+            Read(order=order, labels=tuple(labels))
+            for order in choice_orders(
+                setup.choice_orders, n, choice_order_count(setup, n)
+            )
         ]
     if kind == "yes_no" and setup.noul_orders == 2:
         # Yes and no keep their labels, only the order they are shown in changes.
@@ -136,10 +177,77 @@ def plan_reads(kind: str, labels: Sequence[str], setup: ReadSetup) -> List[Read]
     return [identity_read(labels)]
 
 
-def rotation_offsets(n: int, rotations: int) -> List[int]:
-    """Evenly spaced offsets, nested for doubling counts: those of k are among 2k's."""
-    k = min(n, rotations)
-    return [i * n // k for i in range(k)]
+@lru_cache(maxsize=1024)
+def choice_orders(scheme: str, n: int, count: int) -> Tuple[Tuple[int, ...], ...]:
+    """count orders of n options, the request order first: every row of the
+    scheme when count is n, else the most discordant subset, grown greedily so
+    smaller counts are prefixes of larger ones.
+
+    Both schemes are cyclic families, row s being row 0 shifted by s, so the
+    Kendall distance between two rows depends only on their shift difference.
+    """
+    first = williams_row(n) if scheme == "williams" else list(range(n))
+    rows = [[(v + shift) % n for v in first] for shift in range(n)]
+    # Relabel so the first row reads in request order; distances are unchanged.
+    relabel = {v: i for i, v in enumerate(first)}
+    orders = [tuple(relabel[v] for v in row) for row in rows]
+    if count >= n:
+        return tuple(orders)
+    by_shift = [kendall_distance(rows[0], rows[d]) for d in range(n)]
+    chosen = [0]
+    while len(chosen) < count:
+        # The row farthest from its nearest chosen row, then from all of them.
+        best = max(
+            (s for s in range(n) if s not in chosen),
+            key=lambda s: (
+                min(by_shift[(s - c) % n] for c in chosen),
+                sum(by_shift[(s - c) % n] for c in chosen),
+                -s,
+            ),
+        )
+        chosen.append(best)
+    return tuple(orders[s] for s in chosen)
+
+
+def williams_row(n: int) -> List[int]:
+    """First row of a Williams square, 0, 1, n-1, 2, n-2, ... Its cyclic shifts
+    put every option in every position once and, for even n, every ordered pair
+    of options next to each other once."""
+    row, low, high = [0], 1, n - 1
+    while len(row) < n:
+        row.append(low)
+        low += 1
+        if len(row) < n:
+            row.append(high)
+            high -= 1
+    return row
+
+
+def kendall_distance(a: Sequence[int], b: Sequence[int]) -> int:
+    """Pairs of items that two orders of the same items put the other way round,
+    counted as the inversions of a's items at their positions in b, by merge sort."""
+    position = {v: i for i, v in enumerate(b)}
+    items = [position[v] for v in a]
+    count, width = 0, 1
+    while width < len(items):
+        merged = []
+        for start in range(0, len(items), 2 * width):
+            left = items[start : start + width]
+            right = items[start + width : start + 2 * width]
+            i = j = 0
+            while i < len(left) and j < len(right):
+                if left[i] <= right[j]:
+                    merged.append(left[i])
+                    i += 1
+                else:
+                    merged.append(right[j])
+                    count += len(left) - i
+                    j += 1
+            merged.extend(left[i:])
+            merged.extend(right[j:])
+        items = merged
+        width *= 2
+    return count
 
 
 def label_variants(kind: str, label: str, name: str, setup: ReadSetup) -> List[str]:

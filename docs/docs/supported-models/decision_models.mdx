@@ -239,33 +239,35 @@ A read is one prompt of a question. `x_read_setup` on the request chooses them:
 
 ```json Request
 "x_read_setup": {
-  "choice_rotations": 4,
+  "choice_orders": "williams",
+  "choice_max_orders": "all",
   "choice_name_variants": false,
   "noul_orders": 2,
   "noul_case_variants": true
 }
 ```
 
+- `choice_orders` and `choice_max_orders` show a choice question's options in several orders, the request order first, with the letters kept in place, which averages out a preference for particular letters or positions. `"rotations"` are the cyclic shifts of the options; `"williams"` are the rows of a Williams square. With `choice_max_orders: "all"`, or any number at least the option count, a question with n options is read in n orders, and every option appears in every position once. Williams rows also put every ordered pair of options next to each other once (for an even n), so the answer depends least on the order the request lists the options in; with rotations, each option keeps the same neighbors. With a smaller number, the question is read in that many orders, the most discordant subset of the n: each order added is the one whose pairwise option order disagrees most with the orders already chosen.
 - `noul_orders: 2` asks each yes or no question twice, once for yes or no and once for no or yes, which cancels a preference for the first answer offered.
 - `noul_case_variants` counts `Yes`, `YES`, `No`, and `NO` for their answer where each is one distinct token.
-- `choice_rotations: k` shows the options in `k` evenly spaced cyclic orders with the letters kept in place, which averages out a preference for particular letters.
 - `choice_name_variants` counts the first token of an option's name for it, when no other option or label has that token.
 
-Score levels are ordinal and always read once, in order. The reads of a question are combined by geometric mean. A request without `x_read_setup`, such as one from a System One SDK, gets the server's default reads, set with `--decision-reads-config`; without that flag every question gets the single read of `/v1/decisions`. The config lists every field and caps the rotations a request may ask for:
+Score levels are ordinal and always read once, in order. The reads of a question are combined by geometric mean, and they share the state, which is prefilled once per request. A request without `x_read_setup`, such as one from a System One SDK, gets the server's default reads, set with `--decision-reads-config`; without that flag every question gets the single read of `/v1/decisions`. The config lists every field, and `max_choice_orders` caps the orders any choice question may be read in: a question that a request would read in more orders is refused, and the default reads must name a number within the cap.
 
 ```json Config
 {
   "default_reads": {
-    "choice_rotations": 1,
+    "choice_orders": "williams",
+    "choice_max_orders": 1,
     "choice_name_variants": false,
     "noul_orders": 2,
     "noul_case_variants": true
   },
-  "max_choice_rotations": 8
+  "max_choice_orders": 8
 }
 ```
 
-This is `examples/runtime/systemone/reads.json`: the reads that lowered the mean calibration error of K2-Horizon-3.7B on the benchmark below without costing any task more than a point of accuracy. Without the flag, requests may ask for up to 8 rotations.
+This is `examples/runtime/systemone/reads.json`: by default one order per choice question, and yes or no questions in both orders with every case of the labels, the reads that lowered the mean calibration error of K2-Horizon-3.7B on the benchmark below without costing any task more than a point of accuracy. Without the flag, requests may ask for up to 8 orders.
 
 ### Calibrations
 
@@ -287,7 +289,7 @@ Each question can carry an `x_calibration`, applied to the log probabilities of 
 }
 ```
 
-Every answer carries `x_read_probabilities`, its option probabilities before any calibration, and `x_fingerprint`, which identifies the model, the prompt wording, and the parts of the read setup that apply to the question. A calibration may send the fingerprint of the answers it was fitted on as `fitted_on`; the server then refuses it once the model or those reads change, instead of calibrating with it. Rotations change the fingerprint of choice questions only, and yes or no orders and case variants that of noul questions only.
+Every answer carries `x_read_probabilities`, its option probabilities before any calibration, and `x_fingerprint`, which identifies the model, the prompt wording, the option count, and the reads the question gets. A calibration may send the fingerprint of the answers it was fitted on as `fitted_on`; the server then refuses it once the model or those reads change, instead of calibrating with it. Choice orders change the fingerprint of choice questions only, and yes or no orders and case variants that of noul questions only. The fingerprint follows the reads, not their spelling: `"all"` and any larger number give the same one.
 
 Fit calibrations from labeled rows written as System One request bodies with a `labels` map (an option name, a level index, or `true` or `false` per question id), where a question id always names the same question:
 
@@ -315,9 +317,9 @@ What to keep in mind:
 
 - Only fitted calibrations make probabilities trustworthy for thresholds, and only for the question they were fitted on: the fit tool chose Platt scaling, temperature, or vector scaling per question, and its temperatures ran from 0.5, where K2-Horizon was underconfident, to 5.4.
 - Vector scaling also raised accuracy where a model prefers some options regardless of the input (emotion 0.46 to 0.52, Banking77 0.60 to 0.63, SST-5 0.27 to 0.35).
-- Choice rotations raised K2-Horizon's accuracy by up to 12 points and lowered its NLL and Brier score on every choice task, but raised the calibration error of the emotion task without a calibration, so `reads.json` leaves them off by default. Ask for them per request, and fit calibrations with the same reads.
+- Reading choice questions in several orders raised K2-Horizon's accuracy by up to 12 points and lowered its NLL and Brier score on every choice task, but raised the calibration error of the emotion task without a calibration, so `reads.json` reads one order by default. Ask for more per request, and fit calibrations with the same reads.
 - Content-free priors (asking each question about `N/A`) and a running batch prior were measured and not kept: both lowered accuracy on skewed tasks.
-- Reads multiply the prompts per question (two for noul, `k` for choice), but they share the state, which is prefilled once per request.
+- Reads multiply the prompts per question (two for noul, one per order for choice), but they share the state, which is prefilled once per request.
 - Answers move slightly with batch composition and prefix caching, as described in [Reproducibility](#reproducibility). On K2-Horizon-3.7B, two runs of the same reads differed by 0.001 to 0.014 in mean probability and 0.02 to 0.08 at the 99th percentile, and the top answer changed on 0.3% to 4% of noul and choice questions and on 5% to 8% of the score questions, whose level probabilities are flat.
 
 ## Build decisions without `/v1/decisions`

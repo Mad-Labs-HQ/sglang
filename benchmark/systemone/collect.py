@@ -1,9 +1,12 @@
 """Collect the label logprobs of every read of every task row from /v1/systemone.
 
 Every request asks for the widest set of reads, COLLECTION_READS: up to 8 choice
-rotations, option-name variants, both noul orders, and case variants. Every
+rotations (the 8 most discordant), option-name variants, both noul orders, and
+case variants. Every
 strategy in analyze.py is a function of those reads. The server needs no reads
-config, since its built-in cap allows 8 rotations.
+config, since its built-in cap allows 8 orders. The committed K2-Horizon and Qwen runs
+were collected before the most discordant selection, with 8 evenly spaced
+rotations; analyze.py reads both.
 Each question is also asked once with the content-free state ``N/A``, for
 contextual calibration.
 
@@ -23,7 +26,8 @@ from tasks import TASKS, load_task
 CONTENT_FREE_STATE = "N/A"
 # The reads every strategy of analyze.py selects from.
 COLLECTION_READS = {
-    "choice_rotations": 8,
+    "choice_orders": "rotations",
+    "choice_max_orders": 8,
     "choice_name_variants": True,
     "noul_orders": 2,
     "noul_case_variants": True,

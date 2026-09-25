@@ -212,11 +212,11 @@ class Serving(msgspec.Struct):
     decision_reads_config: A[
         Optional[str],
         "Path of a JSON reads config for /v1/systemone: default_reads, how questions "
-        "are read when a request sends no x_read_setup (choice_rotations, "
-        "choice_name_variants, noul_orders, noul_case_variants), and "
-        "max_choice_rotations, the most rotations a request may ask for. Without it, "
-        "questions get the single read of /v1/decisions and requests may ask for up "
-        "to 8 rotations. Calibrations are sent by clients per question.",
+        "are read when a request sends no x_read_setup (choice_orders, "
+        "choice_max_orders, choice_name_variants, noul_orders, noul_case_variants), "
+        "and max_choice_orders, the most orders a choice question may be read in. "
+        "Without it, questions get the single read of /v1/decisions and requests may "
+        "ask for up to 8 orders. Calibrations are sent by clients per question.",
     ] = None
     strip_thinking_cache: A[
         bool,

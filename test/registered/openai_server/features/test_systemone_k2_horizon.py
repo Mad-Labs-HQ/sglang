@@ -28,19 +28,21 @@ register_cuda_ci(est_time=150, stage="base-b", runner_config="1-gpu-small")
 MODEL = "IFM/K2-Horizon-0.9B"
 
 RAW_READS = {
-    "choice_rotations": 1,
+    "choice_orders": "rotations",
+    "choice_max_orders": 1,
     "choice_name_variants": False,
     "noul_orders": 1,
     "noul_case_variants": False,
 }
 READS_CONFIG = {
     "default_reads": {
-        "choice_rotations": 3,
+        "choice_orders": "williams",
+        "choice_max_orders": 3,
         "choice_name_variants": False,
         "noul_orders": 2,
         "noul_case_variants": True,
     },
-    "max_choice_rotations": 4,
+    "max_choice_orders": 4,
 }
 
 QUESTIONS = {

@@ -30,6 +30,7 @@ from sglang.srt.entrypoints.systemone.calibration import (
     ReadsConfig,
     ReadSetup,
     apply_calibration,
+    choice_order_count,
     combine_reads,
     label_variants,
     plan_reads,
@@ -108,9 +109,10 @@ class SystemOneServing(OpenAIServingDecisions):
             return self.reads_config.default_reads
         return ReadSetup(**request.x_read_setup.model_dump())
 
-    def _fingerprint(self, kind: str, setup: ReadSetup) -> str:
+    def _fingerprint(self, view: QuestionView, setup: ReadSetup) -> str:
         return reads_fingerprint(
-            kind=kind,
+            kind=view.kind,
+            options=len(view.names),
             setup=setup,
             model=self.model,
             model_revision=self.model_revision,
@@ -118,19 +120,25 @@ class SystemOneServing(OpenAIServingDecisions):
         )
 
     def _validate_reads(self, request: SystemOneRequest) -> Optional[str]:
-        """Refuse reads above the server's cap and calibrations fitted on other answers."""
+        """Refuse questions read in more orders than the server allows, and
+        calibrations fitted on other answers."""
         setup = self._read_setup(request)
-        limit = self.reads_config.max_choice_rotations
-        if setup.choice_rotations > limit:
-            return (
-                f"x_read_setup asks for {setup.choice_rotations} choice rotations, "
-                f"but this server allows at most {limit}"
-            )
+        limit = self.reads_config.max_choice_orders
         for question_id, question in request.questions.items():
+            view = _view(question)
+            if view.kind == "choice":
+                count = choice_order_count(setup, len(view.names))
+                if count > limit:
+                    return (
+                        f"question {question_id!r}: x_read_setup reads its "
+                        f"{len(view.names)} options in {count} orders, but this "
+                        f"server allows at most {limit}; send a choice_max_orders "
+                        f"of at most {limit}"
+                    )
             calibration = question.x_calibration
             if calibration is None or calibration.fitted_on is None:
                 continue
-            fingerprint = self._fingerprint(_view(question).kind, setup)
+            fingerprint = self._fingerprint(view, setup)
             if calibration.fitted_on != fingerprint:
                 return (
                     f"question {question_id!r}: its calibration was fitted on "
@@ -188,7 +196,7 @@ class SystemOneServing(OpenAIServingDecisions):
                         if calibration is None
                         else calibration.model_dump(exclude={"fitted_on"})
                     ),
-                    fingerprint=self._fingerprint(view.kind, setup),
+                    fingerprint=self._fingerprint(view, setup),
                     reads=[],
                 )
                 plans.append(plan)
