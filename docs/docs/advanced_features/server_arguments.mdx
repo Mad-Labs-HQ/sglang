@@ -1133,8 +1133,8 @@ Combining `--enable-response-store` with `--disaggregation-mode=prefill` or `dec
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Type: JSON / Dict</td>
     </tr>
         <tr>
-      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--decision-calibration-config`</td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Path of a JSON calibration config for <code>/v1/systemone</code>: the default calibration mode (<code>raw</code>, <code>label_free</code>, or <code>fitted</code>), the label-free reads, and optional fitted profiles written by <code>python -m sglang.srt.entrypoints.systemone.fit_calibration</code>. Without it, answers are raw label probabilities. Profiles fitted for another model, revision, or set of reads are refused at startup. See [Decision models](/docs/supported-models/decision_models#calibration).</td>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--decision-reads-config`</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Path of a JSON reads config for <code>/v1/systemone</code>: <code>default_reads</code>, how questions are read when a request sends no <code>x_read_setup</code>, and <code>max_choice_rotations</code>, the most option rotations a request may ask for. Without it, questions get the single read of <code>/v1/decisions</code> and requests may ask for up to 8 rotations. Calibrations are sent by clients per question. See [Decision models](/docs/supported-models/decision_models#calibration).</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`None`</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Type: str</td>
     </tr>

@@ -1,20 +1,25 @@
 """Fitting and scoring calibration of System One answers on labeled rows.
 
 Every function takes per-answer log probabilities over options (``log_q``, one
-row per answer) and gold option indices, as plain floats and ints.
+row per answer) and gold option indices, as plain floats and ints. Fitted
+calibrations are dicts in the wire format a request carries them in.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Callable, List, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
 
 from sglang.srt.entrypoints.systemone.calibration import (
-    PlattParams,
-    TemperatureParams,
-    apply_params,
+    LOG_FLOOR,
+    apply_calibration,
     log_sigmoid,
 )
+
+Calibration = Dict[str, Any]
+Fit = Callable[[Sequence[Sequence[float]], Sequence[int]], Calibration]
 
 # Search range of fitted temperatures. Published fits on chat models span
 # about 1 to 12, so this leaves room on both sides.
@@ -22,6 +27,9 @@ MIN_TEMPERATURE = 0.05
 MAX_TEMPERATURE = 20.0
 # L2 penalty on Platt parameters, only to keep separable data finite.
 PLATT_L2 = 1e-3
+# L2 penalty pulling vector scaling toward the identity, per mean-NLL unit.
+# Arbitrary; enough to keep options that are rarely gold from running off.
+VECTOR_L2 = 1e-2
 
 
 def nll(log_q: Sequence[Sequence[float]], gold: Sequence[int]) -> float:
@@ -30,12 +38,12 @@ def nll(log_q: Sequence[Sequence[float]], gold: Sequence[int]) -> float:
 
 def fit_temperature(
     log_q: Sequence[Sequence[float]], gold: Sequence[int]
-) -> TemperatureParams:
+) -> Calibration:
     """Temperature minimizing the NLL, by golden-section search over log T."""
 
     def loss(log_t: float) -> float:
-        params = TemperatureParams(temperature=math.exp(log_t))
-        return nll([apply_params(params, row) for row in log_q], gold)
+        calibration = {"type": "temperature", "temperature": math.exp(log_t)}
+        return nll([apply_calibration(calibration, row) for row in log_q], gold)
 
     lo, hi = math.log(MIN_TEMPERATURE), math.log(MAX_TEMPERATURE)
     ratio = (math.sqrt(5) - 1) / 2
@@ -50,10 +58,10 @@ def fit_temperature(
             lo, a, fa = a, b, fb
             b = lo + ratio * (hi - lo)
             fb = loss(b)
-    return TemperatureParams(temperature=math.exp((lo + hi) / 2))
+    return {"type": "temperature", "temperature": math.exp((lo + hi) / 2)}
 
 
-def fit_platt(log_q: Sequence[Sequence[float]], gold: Sequence[int]) -> PlattParams:
+def fit_platt(log_q: Sequence[Sequence[float]], gold: Sequence[int]) -> Calibration:
     """Logistic regression of the first option on its log odds, by damped Newton steps."""
     z = [row[0] - row[1] for row in log_q]
     y = [1.0 if g == 0 else 0.0 for g in gold]
@@ -90,7 +98,7 @@ def fit_platt(log_q: Sequence[Sequence[float]], gold: Sequence[int]) -> PlattPar
         a, b, loss = new_a, new_b, new_loss
         if converged:
             break
-    return PlattParams(a=a, b=b)
+    return {"type": "platt", "a": a, "b": b}
 
 
 def _platt_loss(z: Sequence[float], y: Sequence[float], a: float, b: float) -> float:
@@ -102,23 +110,87 @@ def _platt_loss(z: Sequence[float], y: Sequence[float], a: float, b: float) -> f
     return loss
 
 
+def fit_vector(log_q: Sequence[Sequence[float]], gold: Sequence[int]) -> Calibration:
+    """A scale and bias per option minimizing the mean NLL plus an L2 pull toward
+    the identity, by gradient descent with backtracking (the loss is convex)."""
+    x = np.maximum(np.asarray(log_q, dtype=np.float64), LOG_FLOOR)
+    n, k = x.shape
+    y = np.zeros((n, k))
+    y[np.arange(n), np.asarray(gold)] = 1.0
+    scale, bias = np.ones(k), np.zeros(k)
+
+    def loss_and_grad(s, b):
+        z = x * s + b
+        z = z - z.max(axis=1, keepdims=True)
+        log_p = z - np.log(np.exp(z).sum(axis=1, keepdims=True))
+        p = np.exp(log_p)
+        loss = -(log_p * y).sum() / n + VECTOR_L2 / 2 * (
+            ((s - 1) ** 2).sum() + (b**2).sum()
+        )
+        grad_s = ((p - y) * x).sum(axis=0) / n + VECTOR_L2 * (s - 1)
+        grad_b = (p - y).sum(axis=0) / n + VECTOR_L2 * b
+        return loss, grad_s, grad_b
+
+    loss, grad_s, grad_b = loss_and_grad(scale, bias)
+    step = 1.0
+    for _ in range(2000):
+        norm = float((grad_s**2).sum() + (grad_b**2).sum())
+        if norm < 1e-14:
+            break
+        while step > 1e-12:
+            new_s, new_b = scale - step * grad_s, bias - step * grad_b
+            new_loss, new_grad_s, new_grad_b = loss_and_grad(new_s, new_b)
+            # Armijo condition: accept a step that lowers the loss enough.
+            if new_loss <= loss - 1e-4 * step * norm:
+                break
+            step /= 2
+        else:
+            break
+        scale, bias, loss = new_s, new_b, new_loss
+        grad_s, grad_b = new_grad_s, new_grad_b
+        step *= 2
+    return {"type": "vector", "scale": scale.tolist(), "bias": bias.tolist()}
+
+
 def cross_validated_nll(
     log_q: Sequence[Sequence[float]],
     gold: Sequence[int],
-    fit: Callable[
-        [Sequence[Sequence[float]], Sequence[int]],
-        Union[TemperatureParams, PlattParams],
-    ],
+    fit: Fit,
     folds: int,
 ) -> Tuple[float, float]:
     """Out-of-fold NLL before and after fitting, over folds taken by row index."""
     fitted_rows: List[List[float]] = [[] for _ in gold]
     for fold in range(folds):
         train = [i for i in range(len(gold)) if i % folds != fold]
-        params = fit([log_q[i] for i in train], [gold[i] for i in train])
+        calibration = fit([log_q[i] for i in train], [gold[i] for i in train])
         for i in range(fold, len(gold), folds):
-            fitted_rows[i] = apply_params(params, log_q[i])
+            fitted_rows[i] = apply_calibration(calibration, log_q[i])
     return nll(log_q, gold), nll(fitted_rows, gold)
+
+
+# Calibrations tried for each question kind, as /v1/decisions names kinds.
+CANDIDATES: Dict[str, Tuple[Tuple[str, Fit], ...]] = {
+    "yes_no": (("temperature", fit_temperature), ("platt", fit_platt)),
+    "choice": (("temperature", fit_temperature), ("vector", fit_vector)),
+    "score": (("temperature", fit_temperature), ("vector", fit_vector)),
+}
+
+
+def choose_calibration(
+    kind: str,
+    log_q: Sequence[Sequence[float]],
+    gold: Sequence[int],
+    folds: int,
+) -> Tuple[Optional[Calibration], Dict[str, float]]:
+    """The candidate with the lowest out-of-fold NLL, fitted on all rows, or None
+    when no candidate beats leaving the answers as they are."""
+    report = {"none": nll(log_q, gold)}
+    for name, fit in CANDIDATES[kind]:
+        report[name] = cross_validated_nll(log_q, gold, fit, folds)[1]
+    best = min(report, key=report.get)
+    if best == "none":
+        return None, report
+    return dict(CANDIDATES[kind])[best](log_q, gold), report
 
 
 def expected_calibration_error(

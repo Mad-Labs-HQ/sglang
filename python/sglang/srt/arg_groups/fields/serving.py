@@ -209,14 +209,14 @@ class Serving(msgspec.Struct):
             type_parser=json.loads,
         ),
     ] = None
-    decision_calibration_config: A[
+    decision_reads_config: A[
         Optional[str],
-        "Path of a JSON calibration config for /v1/systemone: the default "
-        "calibration mode (raw, label_free, or fitted), the label-free reads, and "
-        "optional fitted profiles written by "
-        "`python -m sglang.srt.entrypoints.systemone.fit_calibration`. Without it, "
-        "answers are raw label probabilities. Profiles fitted for another model, "
-        "revision, or set of reads are refused at startup.",
+        "Path of a JSON reads config for /v1/systemone: default_reads, how questions "
+        "are read when a request sends no x_read_setup (choice_rotations, "
+        "choice_name_variants, noul_orders, noul_case_variants), and "
+        "max_choice_rotations, the most rotations a request may ask for. Without it, "
+        "questions get the single read of /v1/decisions and requests may ask for up "
+        "to 8 rotations. Calibrations are sent by clients per question.",
     ] = None
     strip_thinking_cache: A[
         bool,
