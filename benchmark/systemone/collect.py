@@ -1,9 +1,9 @@
 """Collect the label logprobs of every read of every task row from /v1/systemone.
 
-Run against a server launched with ``--decision-calibration-config
-configs/collect.json``. That config makes the widest set of label-free reads:
-up to 8 choice rotations, option-name variants, both noul orders, and case
-variants. Every strategy in analyze.py is a function of those reads.
+Every request asks for the widest set of reads, COLLECTION_READS: up to 8 choice
+rotations, option-name variants, both noul orders, and case variants. Every
+strategy in analyze.py is a function of those reads. The server needs no reads
+config, since its built-in cap allows 8 rotations.
 Each question is also asked once with the content-free state ``N/A``, for
 contextual calibration.
 
@@ -21,6 +21,13 @@ import requests
 from tasks import TASKS, load_task
 
 CONTENT_FREE_STATE = "N/A"
+# The reads every strategy of analyze.py selects from.
+COLLECTION_READS = {
+    "choice_rotations": 8,
+    "choice_name_variants": True,
+    "noul_orders": 2,
+    "noul_case_variants": True,
+}
 
 
 def ask(session, url, state, question):
@@ -31,7 +38,7 @@ def ask(session, url, state, question):
             "state": state,
             "model": "local",
             "questions": {"q": question},
-            "x_calibration": "label_free",
+            "x_read_setup": COLLECTION_READS,
             "x_return_reads": True,
         },
         timeout=600,

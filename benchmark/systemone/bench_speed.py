@@ -23,6 +23,12 @@ import requests
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
+RAW_READS = {
+    "choice_rotations": 1,
+    "choice_name_variants": False,
+    "noul_orders": 1,
+    "noul_case_variants": False,
+}
 TOPICS = [
     "billing",
     "outage",
@@ -108,7 +114,8 @@ def run_point(
             "state": make_state(tokenizer, corpus, state_tokens, seed * 1000 + i),
             "model": "bench",
             "questions": make_questions(questions),
-            "x_calibration": mode,
+            # label_free reads are the server's default reads; raw asks for the single read.
+            **({"x_read_setup": RAW_READS} if mode == "raw" else {}),
         }
         for i in range(requests_n)
     ]
