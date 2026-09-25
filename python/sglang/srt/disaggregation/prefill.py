@@ -581,13 +581,15 @@ class SchedulerDisaggregationPrefillMixin:
             if room is not None and room in kv_mgr.transfer_infos:
                 prefetch(room)
 
-    def checkpoint_disagg_prefill(self: Scheduler, req: Req) -> None:
+    def checkpoint_disagg_prefill(
+        self: Scheduler, req: Req, *, chunked: bool = False
+    ) -> None:
         cache = self.tree_cache
         if req.pending_bootstrap and _uses_write_through_cache(cache):
             cache.advance_unpublished_req(req)
             return
 
-        checkpoint_kv_cache(req, cache)
+        checkpoint_kv_cache(req, cache, chunked=chunked)
 
     def release_aborted_prefill_waiting_req(self: Scheduler, req: Req) -> None:
         self.clear_pending_chunk_send(req)
@@ -1255,7 +1257,7 @@ class SchedulerDisaggregationPrefillMixin:
         chunked_req_to_exclude = set()
         if (req := self.chunked_req) is not None:
             chunked_req_to_exclude.add(req)
-            self.checkpoint_disagg_prefill(req)
+            self.checkpoint_disagg_prefill(req, chunked=True)
 
             if not self.check_bootstrap(req):
                 if is_aborted(req):

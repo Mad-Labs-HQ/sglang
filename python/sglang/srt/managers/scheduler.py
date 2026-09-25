@@ -2817,6 +2817,7 @@ class Scheduler(
                 routing_key=recv_req.routing_key,
                 extra_key=recv_req.extra_key,
                 cache_salt=recv_req.cache_salt,
+                skip_cache_insert=recv_req.skip_cache_insert,
                 http_worker_ipc=recv_req.http_worker_ipc,
                 dllm_config=self.dllm_config,
                 time_stats=recv_req.time_stats,
@@ -3533,9 +3534,9 @@ class Scheduler(
 
     def stash_chunked_request(self, req: Req):
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            self.checkpoint_disagg_prefill(req)
+            self.checkpoint_disagg_prefill(req, chunked=True)
         else:
-            checkpoint_kv_cache(req, self.tree_cache)
+            checkpoint_kv_cache(req, self.tree_cache, chunked=True)
 
     def process_pending_chunked_abort(self) -> None:
         """Abort an in-flight chunked-prefill request once it is safe to do so.

@@ -169,13 +169,29 @@ def free_kv_row_segments(
         allocator.free_segments(swa_alive)
 
 
-def checkpoint_kv_cache(req: Req, tree_cache: BasePrefixCache) -> None:
+def checkpoint_kv_cache(
+    req: Req, tree_cache: BasePrefixCache, *, chunked: bool = False
+) -> None:
     """Publish what the running request has computed so far, unless it is
     barred from the tree."""
     # The tree reads req.finished() to tell a checkpoint from the final
     # insert; a finished request belongs in release_kv_cache.
     assert not req.finished(), f"checkpointing finished request {req.rid}"
     if req.skip_radix_cache_insert:
+        return
+
+    # A request that opted out of publication still needs the chunked-prefill
+    # bookkeeping: insert_req is what extends req.prefix_indices (even with the
+    # radix cache disabled), PrefillAdder.add_chunked_req starts the next chunk
+    # at len(req.prefix_indices), and the scheduler only stashes a chunk while
+    #   chunked_req.extend_range.end > len(chunked_req.prefix_indices)
+    # (scheduler.py). Skip that and a multi-chunk prompt re-prefills the same
+    # chunk forever. Publication for those interior chunks is the price; the
+    # final whole-sequence node -- the one worth caching, and the only one a
+    # future request could match end to end -- is still withheld at finish.
+    # getattr: a Req built without __init__ (tests, synthetic requests) has no
+    # opinion, and must not lose its KV bookkeeping over a missing attribute.
+    if getattr(req, "skip_cache_insert", False) and not chunked:
         return
 
     tree_cache.insert_req(req, up_to=req.extend_range.end)
@@ -316,7 +332,11 @@ def release_kv_cache(req: Req, tree_cache: BasePrefixCache, is_insert: bool = Tr
         return
 
     owned_kv_len = req.owned_kv_len()
-    is_insert = is_insert and not req.skip_radix_cache_insert
+    is_insert = (
+        is_insert
+        and not req.skip_radix_cache_insert
+        and not getattr(req, "skip_cache_insert", False)
+    )
     if is_insert:
         # A tree that takes over component state (mamba) must see the request
         # finished, or the insert forks the state and the slot leaks.
