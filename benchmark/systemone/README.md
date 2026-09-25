@@ -252,3 +252,41 @@ Offline strategies on the test half:
   five choice and score tasks (SST-5 0.22 to 0.32, Yelp 0.25 to 0.32). On
   Banking77, whose single read is near chance, only a temperature helped, while
   rotations raised accuracy to 0.24: reads and calibrations fix different things.
+
+## Option orders: rotations, Williams, and random permutations
+
+`permutations.py` compares the orders a choice question can be read in, at
+equal numbers of reads, on the first 300 test rows of each task: the orders the
+server reads for `choice_orders` `"rotations"` and `"williams"` (all n orders at
+k = n, the most discordant subset by Kendall distance below that), and random
+permutations. Each set's reads are combined by geometric mean and compared with
+the gold labels and with a reference, the average over all 24 orders (AG News)
+or 36 random ones (emotion). Full tables: `results/*/permutations.md`.
+
+At k = n:
+
+| model, task | orders | accuracy | NLL | mean abs diff from reference | top answer agrees with reference |
+| --- | --- | --- | --- | --- | --- |
+| K2, AG News (4) | rotations | 0.907 | 0.288 | 0.0086 | 0.983 |
+| | williams | 0.907 | 0.271 | 0.0037 | 0.997 |
+| | random | 0.900 | 0.312 | 0.0239 | 0.957 |
+| K2, emotion (6) | rotations | 0.513 | 1.508 | 0.0245 | 0.920 |
+| | williams | 0.480 | 1.583 | 0.0142 | 0.950 |
+| | random | 0.470 | 1.603 | 0.0296 | 0.937 |
+| Qwen, AG News (4) | rotations | 0.810 | 0.768 | 0.0214 | 0.960 |
+| | williams | 0.823 | 0.745 | 0.0096 | 0.983 |
+| | random | 0.827 | 0.792 | 0.0231 | 0.960 |
+| Qwen, emotion (6) | rotations | 0.527 | 1.826 | 0.0425 | 0.870 |
+| | williams | 0.513 | 2.036 | 0.0205 | 0.933 |
+| | random | 0.513 | 2.081 | 0.0449 | 0.840 |
+
+- A full Williams square gives the answer closest to averaging over every
+  order, on both models, so it depends least on how a client lists the options.
+  Its NLL was the best on AG News and worse than rotations on emotion.
+- Below k = n, Williams subsets did worse than rotation subsets. By Kendall
+  distance the most discordant second Williams order is the full reversal,
+  which keeps middle options in the middle, while the second rotation moves
+  every option n/2 places. At k = 2 the NLL was 0.401 against 0.251 (K2, AG
+  News) and 6.14 against 5.15 (Qwen, Banking77).
+- Random permutations were no better than rotations anywhere and are not
+  deterministic.
