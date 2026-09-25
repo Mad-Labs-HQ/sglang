@@ -1,0 +1,13 @@
+{
+  "default_mode": "label_free",
+  "label_free": {
+    "choice_rotations": 1,
+    "choice_name_variants": false,
+    "noul_orders": 2,
+    "noul_case_variants": true,
+    "batch_prior": {
+      "type": "off"
+    }
+  },
+  "fitted": null
+}
