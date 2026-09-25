@@ -258,3 +258,171 @@ def test_non_rfc_numbers_are_never_unwrapped(width, payload):
     json.JSONDecoder(
         parse_constant=lambda c: pytest.fail(f"non-RFC literal on the wire: {c}")
     ).decode(raw)
+
+
+# --- incremental tool-arg streaming ------------------------------------------
+# Stock qwen3_coder withholds a <parameter> value until its closing tag, so a
+# tool call that authors a file lands as one delta after seconds of dead air:
+# a 7,459-char body measured 3 deltas, max 7,708 chars. With streaming: 472
+# deltas, max 18. Only DECLARED string parameters stream -- see
+# _should_stream_param for why undeclared ones must not.
+
+STREAM_TOOLS = [
+    Tool(
+        function=Function(
+            name="writer",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "body": {"type": "string"},
+                    "count": {"type": "integer"},
+                    "flag": {"type": "boolean"},
+                    "obj": {"type": "object"},
+                },
+            },
+        )
+    ),
+    Tool(
+        function=Function(
+            name="noprops", parameters={"type": "object", "$ref": "#/$defs/X"}
+        )
+    ),
+    # Declared only inside a top-level union branch (#36626): still declared.
+    Tool(
+        function=Function(
+            name="union_writer",
+            parameters={
+                "anyOf": [
+                    {"type": "object", "properties": {"body": {"type": "string"}}},
+                    {"type": "object", "properties": {"count": {"type": "integer"}}},
+                ]
+            },
+        )
+    ),
+]
+
+LONG_BODY = "\n".join(f"line {i}: " + "x" * 40 for i in range(60))
+
+
+def param_call(fn, params):
+    inner = "".join(f"<parameter={n}>\n{v}\n</parameter>\n" for n, v in params)
+    return f"<tool_call>\n<function={fn}>\n{inner}</function>\n</tool_call>"
+
+
+def stream_parse(text, width):
+    parser = FunctionCallParser(STREAM_TOOLS, "qwen3_coder")
+    if width is None:
+        _, calls = parser.parse_non_stream(text)
+        return [c.parameters or "" for c in calls]
+    out = []
+    for i in range(0, len(text), width):
+        _, inc = parser.parse_stream_chunk(text[i : i + width])
+        out.extend(c.parameters or "" for c in inc)
+    _, inc = parser.parse_stream_end()
+    out.extend(c.parameters or "" for c in inc)
+    return out
+
+
+STREAM_WIDTHS = [1, 3, 13, 500, 10000]
+
+
+@pytest.mark.parametrize("tool", ["writer", "union_writer"])
+def test_declared_string_param_streams_incrementally(tool):
+    deltas = stream_parse(param_call(tool, [("body", LONG_BODY)]), 13)
+    payload = [d for d in deltas if d not in ("{", "}")]
+    assert len(payload) > 20, f"only {len(payload)} deltas -- not streaming"
+    assert max(len(d) for d in payload) < len(LONG_BODY) / 2
+    assert json.loads("".join(deltas)) == {"body": LONG_BODY}
+
+
+@pytest.mark.parametrize("width", STREAM_WIDTHS)
+@pytest.mark.parametrize(
+    "payload",
+    [
+        LONG_BODY,
+        "plain",
+        "",
+        "a < b and c <= d",
+        "literal </parameter> inside",
+        "<parameter=nested>oops</parameter>",
+        "unicode: éè中文",
+        "trailing\n",
+        "double\n\n\nnewlines",
+        'quotes " backslash \\ tab \t',
+        "cat > /tmp/o.txt <<'EOF'\n`x` is not decoration\nEOF",
+    ],
+)
+def test_streaming_never_changes_content(width, payload):
+    """Streaming changes delivery, never the value the client assembles."""
+    text = param_call("writer", [("body", payload)])
+    assert json.loads("".join(stream_parse(text, width))) == json.loads(
+        "".join(stream_parse(text, None))
+    )
+
+
+@pytest.mark.parametrize("width", STREAM_WIDTHS)
+def test_streaming_concatenation_is_a_growing_prefix(width):
+    text = param_call("writer", [("body", LONG_BODY)])
+    parser = FunctionCallParser(STREAM_TOOLS, "qwen3_coder")
+    acc, seen = "", []
+    for i in range(0, len(text), width):
+        _, inc = parser.parse_stream_chunk(text[i : i + width])
+        for c in inc:
+            acc += c.parameters or ""
+            seen.append(acc)
+    _, inc = parser.parse_stream_end()
+    for c in inc:
+        acc += c.parameters or ""
+        seen.append(acc)
+    assert all(acc.startswith(p) for p in seen)
+
+
+@pytest.mark.parametrize("width", STREAM_WIDTHS)
+@pytest.mark.parametrize(
+    "name,raw,expected",
+    [
+        ("count", "42", 42),
+        ("flag", "true", True),
+        ("obj", '{"k": [1, 2]}', {"k": [1, 2]}),
+    ],
+)
+def test_non_string_params_are_not_streamed(width, name, raw, expected):
+    """JSON encoding of non-strings is not prefix-stable, so they buffer."""
+    text = param_call("writer", [(name, raw)])
+    assert json.loads("".join(stream_parse(text, width))) == {name: expected}
+
+
+@pytest.mark.parametrize("width", STREAM_WIDTHS)
+def test_arguments_envelope_still_unwraps_under_streaming(width):
+    """The composition this patch has to preserve.
+
+    Upstream PR #21829 streams undeclared parameters ("treat as string"). Doing
+    that here would put `"arguments": "` on the wire before
+    _unwrap_arguments_envelope could run, and the streaming path cannot retract
+    what it has already sent -- so the repair would become impossible.
+    """
+    text = param_call("writer", [("arguments", json.dumps({"body": LONG_BODY}))])
+    deltas = stream_parse(text, width)
+    assert json.loads("".join(deltas)) == {"body": LONG_BODY}
+    assert not any(d.startswith('"arguments"') for d in deltas)
+
+
+@pytest.mark.parametrize("width", STREAM_WIDTHS)
+@pytest.mark.parametrize("tool", ["writer", "noprops"])
+def test_undeclared_param_is_never_streamed(width, tool):
+    """An undeclared parameter arrives in one piece, whatever the chunking.
+
+    This is the semantic that differs from upstream PR #21829 on purpose.
+    """
+    value = "a long value " * 20
+    deltas = stream_parse(param_call(tool, [("notes", value)]), width)
+    assert [d for d in deltas if "notes" in d] == [f'"notes": {json.dumps(value)}']
+    assert json.loads("".join(deltas)) == {"notes": value}
+
+
+@pytest.mark.parametrize("width", STREAM_WIDTHS)
+def test_schema_without_properties_never_streams(width):
+    text = param_call("noprops", [("whatever", "a long value " * 20)])
+    assert json.loads("".join(stream_parse(text, width))) == json.loads(
+        "".join(stream_parse(text, None))
+    )
