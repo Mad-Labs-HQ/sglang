@@ -611,10 +611,14 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
         question = {"first": _question("yes_no")}
         original_template = self.tokenizer.chat_template
         self.addCleanup(setattr, self.tokenizer, "chat_template", original_template)
-        # Reasoning that the detected toggle does not control.
+        # Reasoning that the detected toggle does not control, in a template that
+        # renders no reply, so no empty reasoning block can close it either.
         open_block = "{{ messages[0]['content'] }}\nassistant\n<think>\n"
+        # Always reasons, in a template that renders no reply to close a block with.
+        no_markers = "{{ messages[0]['content'] }}\nassistant:\n"
+        always = ReasoningToggleConfig(special_case="always")
         cases = {
-            "always reason": (None, ReasoningToggleConfig(special_case="always"), {}),
+            "always reason before answering": (no_markers, always, {}),
             "sets 'enable_thinking' to True": (None, None, {"enable_thinking": True}),
             "sets 'enable_thinking' to None": (None, None, {"enable_thinking": None}),
             "sets 'enable_thinking' to 0": (None, None, {"enable_thinking": 0}),
@@ -631,17 +635,23 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertIn(message, json.loads(response.body)["message"])
                 self.assertEqual(manager.requests, [])
-        # A parser whose answers start inside reasoning needs a closed block, and
-        # its advice comes first when the template's own replies also open one.
-        no_block = (
+        # A parser whose answers start inside reasoning needs a closed block,
+        # which the template's own reply can supply after the generation prompt.
+        reply_template = (
             "{% for m in messages %}{% if m['role'] == 'user' %}"
-            "{{ m['content'] }}\nassistant:\n\n{% else %}<think></think>"
+            "{{ m['content'] }}\nassistant:\n\n{% else %}REPLY"
             "{{ m['content'] }}{% endif %}{% endfor %}"
         )
+        no_block = reply_template.replace("REPLY", "")
+        empty_block = reply_template.replace("REPLY", "<think></think>")
         closed_block = (
             "{{ messages[0]['content'] }}\nassistant:\n<think>\n\n</think>\n\n"
         )
-        for template, status in ((no_block, 400), (closed_block, 200)):
+        for template, status in (
+            (no_block, 400),
+            (empty_block, 200),
+            (closed_block, 200),
+        ):
             with self.subTest(template=template[-24:]):
                 manager = ScoringManager(self.tokenizer)
                 handler = _handler(manager, reasoning_parser="deepseek-r1")
@@ -650,13 +660,21 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
                     "s", {"first": _question("choice", {"a": None, "b": None})}
                 )
                 response = await handler.handle_request(request, None)
+                prompt = (
+                    self.tokenizer.decode(manager.requests[-1].input_ids[0])
+                    if manager.requests
+                    else None
+                )
                 self.tokenizer.chat_template = original_template
                 self.assertEqual(response.status_code, status)
                 if status == 400:
+                    message = json.loads(response.body)["message"]
                     self.assertIn(
-                        "expects answers to start with a reasoning block",
-                        json.loads(response.body)["message"],
+                        "expects answers to start with a reasoning block", message
                     )
+                    self.assertIn("does not close an empty reasoning block", message)
+                else:
+                    self.assertRegex(prompt, r"</think>\s*$")
         # A toggle that only the parser names, in its plain or explicit form, is
         # turned off and checked like a detected one.
         choice = {"first": _question("choice", {"a": None, "b": None})}
@@ -682,8 +700,13 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(
                     f"sets '{toggle}' to True", json.loads(response.body)["message"]
                 )
-        # A template that opens reasoning before every answer is refused.
-        for reply, status in (("<think></think>", 400), ("", 200)):
+        # A template that opens reasoning before every answer is answered after
+        # its empty block, and refused when its replies always carry reasoning.
+        for reply, status in (
+            ("<think>draft</think>", 400),
+            ("<think></think>", 200),
+            ("", 200),
+        ):
             with self.subTest(reply=reply):
                 self.tokenizer.chat_template = (
                     "{% for m in messages %}{% if m['role'] == 'user' %}"
@@ -791,6 +814,123 @@ class TestDecisions(unittest.IsolatedAsyncioTestCase):
             ),
             self.tokenizer.encode("A", add_special_tokens=False),
         )
+
+
+# Tokenizer files only, of a chat template that opens reasoning before every answer.
+ALWAYS_REASONING_TOKENIZER = "IFM/K2-Horizon-3.7B"
+ALWAYS_REASONING_ARCHITECTURE = "K2HorizonForCausalLM"
+
+
+class TestAlwaysReasoningTemplates(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tokenizer = AutoTokenizer.from_pretrained(ALWAYS_REASONING_TOKENIZER)
+
+    def setUp(self):
+        self.addCleanup(restore_context, snapshot_context())
+
+    def _manager(self):
+        return ScoringManager(
+            self.tokenizer, architecture=ALWAYS_REASONING_ARCHITECTURE
+        )
+
+    def test_template_is_detected_as_always_reasoning(self):
+        handler = _handler(self._manager())
+        self.assertTrue(handler.always_reasons)
+        self.assertEqual(handler.reasoning_markers, ("<ifm|think>", "</ifm|think>"))
+
+    async def test_answers_follow_the_empty_reasoning_block(self):
+        manager = self._manager()
+        request = _request(
+            "The integration keeps failing.",
+            {
+                "team": _question("choice", {"billing": None, "technical": "Bugs"}),
+                "mood": _question("score", ["Calm", "Angry"]),
+                "urgent": _question("yes_no"),
+            },
+        )
+        response = await _handler(manager).handle_request(request, None)
+        self.assertEqual(response.status_code, 200)
+        batch = manager.requests[0]
+        for ids, label_ids, labels in zip(
+            batch.input_ids,
+            batch.token_ids_logprob,
+            (["A", "B"], ["0", "1"], ["yes", "no"]),
+        ):
+            prompt = self.tokenizer.decode(ids)
+            self.assertTrue(
+                prompt.endswith(
+                    "<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>"
+                ),
+                prompt[-80:],
+            )
+            # The prompt is the generation prompt with the empty block closed.
+            content = self.tokenizer.decode(ids).split("<|ifm|im_start|>user\n", 1)[1]
+            content = content.split("<|ifm|im_end|>", 1)[0]
+            generation = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": content}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            self.assertEqual(prompt, generation + "</ifm|think>")
+            self.assertEqual(
+                label_ids,
+                [
+                    self.tokenizer.encode(label, add_special_tokens=False)[0]
+                    for label in labels
+                ],
+            )
+
+    async def test_systemone_labels_more_than_26_options(self):
+        manager = self._manager()
+        names = [f"option {i}" for i in range(60)]
+        request = _systemone_request(
+            {"q": {"type": "choice", "criteria": {name: None for name in names}}}
+        )
+        serving = _handler(manager, serving_class=SystemOneServing)
+        response = await serving.handle_request(request, None)
+        self.assertEqual(response.status_code, 200)
+        label_ids = manager.requests[0].token_ids_logprob[0]
+        self.assertEqual(len(label_ids), 60)
+        self.assertEqual(len(set(label_ids)), 60)
+        self.assertEqual(
+            list(json.loads(response.body)["answers"]["q"]["probabilities"]), names
+        )
+
+    async def test_a_generation_prompt_the_reply_does_not_continue_is_refused(self):
+        # A lower reasoning effort opens another tag than the reply closes.
+        manager = self._manager()
+        request = _request(
+            "s",
+            {"q": _question("yes_no")},
+            chat_template_kwargs={"reasoning_effort": "low"},
+        )
+        response = await _handler(manager).handle_request(request, None)
+        self.assertEqual(response.status_code, 400)
+        message = json.loads(response.body)["message"]
+        self.assertIn("always reason before answering", message)
+        self.assertIn("does not close an empty reasoning block", message)
+        self.assertEqual(manager.requests, [])
+
+    async def test_always_reasoning_without_markers_is_refused(self):
+        original_template = self.tokenizer.chat_template
+        self.addCleanup(setattr, self.tokenizer, "chat_template", original_template)
+        self.tokenizer.chat_template = (
+            "{% for m in messages %}{{ m['content'] }}\n{% endfor %}"
+            "{% if add_generation_prompt %}assistant:\n{% endif %}"
+        )
+        manager = self._manager()
+        handler = _handler(
+            manager, reasoning_config=ReasoningToggleConfig(special_case="always")
+        )
+        self.assertIsNone(handler.reasoning_markers)
+        response = await handler.handle_request(
+            _request("s", {"q": _question("yes_no")}), None
+        )
+        self.assertEqual(response.status_code, 400)
+        message = json.loads(response.body)["message"]
+        self.assertIn("always reason before answering", message)
+        self.assertNotIn("empty reasoning block", message)
 
 
 def _systemone_request(questions, **kwargs):
@@ -1152,16 +1292,22 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
             chat_template_kwargs={"enable_thinking": True},
         )
         plain = _systemone_request({"q": {"type": "noul", "instructions": "x"}})
+        serving = self._serving()
+        response = await serving.handle_request(request, None)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            "sets 'enable_thinking' to True", json.loads(response.body)["message"]
+        )
+        self.assertEqual(serving.tokenizer_manager.requests, [])
+        # A template that always reasons is answered after the empty block its
+        # own replies close, which on Qwen is the prompt with thinking off.
         always = ReasoningToggleConfig(special_case="always")
-        for message, serving, body in (
-            ("sets 'enable_thinking' to True", self._serving(), request),
-            ("always reason", self._serving(reasoning_config=always), plain),
-        ):
-            with self.subTest(message):
-                response = await serving.handle_request(body, None)
-                self.assertEqual(response.status_code, 400)
-                self.assertIn(message, json.loads(response.body)["message"])
-                self.assertEqual(serving.tokenizer_manager.requests, [])
+        prompts = []
+        for serving in (self._serving(), self._serving(reasoning_config=always)):
+            response = await serving.handle_request(plain, None)
+            self.assertEqual(response.status_code, 200)
+            prompts.append(serving.tokenizer_manager.requests[0].input_ids)
+        self.assertEqual(prompts[0], prompts[1])
         # The server checks of /v1/decisions apply too.
         serving = self._serving(
             ScoringManager(self.tokenizer, dllm_algorithm="LowConfidence")

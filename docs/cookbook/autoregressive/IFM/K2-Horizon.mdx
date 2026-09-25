@@ -252,3 +252,34 @@ Tool call: get_weather({"city": "Paris"})
 ### 4.3 HiCache
 
 For large checkpoints or repeated long-context prefixes, enable **HiCache** in the [Playground](#playground), then choose a storage backend and write policy. Treat the generated override as unverified until it is exercised on your storage stack.
+
+### 4.4 Decisions and System One
+
+K2-Horizon can answer typed questions about an input with a probability for every option through `/v1/decisions` and the System One compatible `/v1/systemone`, without generating text. Its chat template opens a reasoning block before every answer and has no switch to turn thinking off, so the server reads each answer after the empty `<ifm|think>\n</ifm|think>` block that the template itself renders for a reply without reasoning. The answer skips the model's reasoning, which is fast but less accurate than chat with `reasoning_effort="high"` on hard questions. Keep `reasoning_effort` at its default for these routes, since another effort opens a different reasoning tag and the request is refused. With a server started by `sglang serve --model-path IFM/K2-Horizon-3.7B --reasoning-parser k2_horizon --host 127.0.0.1 --port 30000`:
+
+```python Example
+import requests
+
+response = requests.post(
+    "http://127.0.0.1:30000/v1/systemone",
+    json={
+        "state": "I've been trying to connect my Stripe account for 3 days and the integration keeps failing.",
+        "model": "jev-latest",
+        "questions": {
+            "team": {
+                "type": "choice",
+                "instructions": "Which team should handle this ticket?",
+                "criteria": {"billing": None, "technical": "Bugs or integration problems", "sales": None},
+            },
+            "urgent": {"type": "noul", "instructions": "The customer needs an answer today."},
+        },
+    },
+    timeout=60,
+)
+response.raise_for_status()
+answers = response.json()["answers"]
+print(answers["team"]["choice"], answers["team"]["probabilities"])
+print(answers["urgent"]["noul"])
+```
+
+See [Decision models](/docs/supported-models/decision_models) for the request reference, how the probabilities are computed, and the limits.

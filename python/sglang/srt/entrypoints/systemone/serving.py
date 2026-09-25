@@ -102,7 +102,7 @@ class SystemOneServing(OpenAIServingDecisions):
         tokenizer = self.tokenizer_manager.tokenizer
         contexts = []
         for message in ("x", "y"):
-            prompt = self._apply_chat_template(message, chat_template_kwargs)
+            prompt = self._answer_prompt(message, chat_template_kwargs)
             prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
             contexts.append(
                 label_context(tokenizer, prompt, prompt_ids, self.added_tokens)
