@@ -54,10 +54,11 @@ def fit_temperature(
 
 
 def fit_platt(log_q: Sequence[Sequence[float]], gold: Sequence[int]) -> PlattParams:
-    """Logistic regression of the first option on its log odds, by Newton steps."""
+    """Logistic regression of the first option on its log odds, by damped Newton steps."""
     z = [row[0] - row[1] for row in log_q]
     y = [1.0 if g == 0 else 0.0 for g in gold]
     a, b = 1.0, 0.0
+    loss = _platt_loss(z, y, a, b)
     for _ in range(100):
         grad_a, grad_b = PLATT_L2 * a, PLATT_L2 * b
         h_aa, h_ab, h_bb = PLATT_L2, 0.0, PLATT_L2
@@ -74,10 +75,31 @@ def fit_platt(log_q: Sequence[Sequence[float]], gold: Sequence[int]) -> PlattPar
             break
         step_a = (h_bb * grad_a - h_ab * grad_b) / det
         step_b = (h_aa * grad_b - h_ab * grad_a) / det
-        a, b = a - step_a, b - step_b
-        if abs(step_a) + abs(step_b) < 1e-10:
+        # Where predictions saturate the Hessian is tiny and a full step overshoots,
+        # so halve it until the loss falls.
+        scale = 1.0
+        while True:
+            new_a, new_b = a - scale * step_a, b - scale * step_b
+            new_loss = _platt_loss(z, y, new_a, new_b)
+            if new_loss <= loss or scale < 1e-8:
+                break
+            scale /= 2
+        if new_loss > loss:
+            break
+        converged = abs(new_a - a) + abs(new_b - b) < 1e-10
+        a, b, loss = new_a, new_b, new_loss
+        if converged:
             break
     return PlattParams(a=a, b=b)
+
+
+def _platt_loss(z: Sequence[float], y: Sequence[float], a: float, b: float) -> float:
+    """Penalized negative log likelihood that fit_platt minimizes."""
+    loss = PLATT_L2 * (a * a + b * b) / 2
+    for zi, yi in zip(z, y):
+        t = a * zi + b
+        loss -= yi * log_sigmoid(t) + (1 - yi) * log_sigmoid(-t)
+    return loss
 
 
 def cross_validated_nll(
