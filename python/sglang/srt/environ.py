@@ -708,6 +708,9 @@ class Envs:
     SGLANG_OPT_RELEASE_PREFILL_SWA = EnvBoolWithAlias(
         False, deprecated_name="SGLANG_OPT_SWA_RELEASE_LEAF_LOCK_AFTER_WINDOW"
     )
+    # Decision routes prefill a token prefix that all prompts of a request share
+    # once before scoring them, when it is at least this long; raise to disable.
+    SGLANG_DECISION_PREFIX_PRIME_MIN_TOKENS = EnvInt(256)
 
     # ===================================================================
     # PD disaggregation runtime
