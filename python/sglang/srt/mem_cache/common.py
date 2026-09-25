@@ -267,13 +267,22 @@ def match_kv_cache(
     return match_result
 
 
-def checkpoint_kv_cache(req: Req, tree_cache: BasePrefixCache) -> None:
+def checkpoint_kv_cache(
+    req: Req, tree_cache: BasePrefixCache, *, chunked: bool = False
+) -> None:
     """Publish what the running request has computed so far, unless it is
     barred from the tree."""
     # The tree reads req.finished() to tell a checkpoint from the final
     # insert; a finished request belongs in release_kv_cache.
     assert not req.finished(), f"checkpointing finished request {req.rid}"
-    if not req.skip_radix_cache_insert:
+    # A request that opted out of publication (skip_cache_insert) withholds its
+    # whole-prompt checkpoint, the node a later request could match end to end,
+    # and is still checkpointed between the chunks of a chunked prefill, as on
+    # the line this was qualified on.
+    # getattr: a Req built without __init__ (tests, synthetic requests) has no
+    # opinion, and must not lose its KV bookkeeping over a missing attribute.
+    opted_out = getattr(req, "skip_cache_insert", False) and not chunked
+    if not req.skip_radix_cache_insert and not opted_out:
         tree_cache.checkpoint(req, up_to=req.extend_end)
     # The next extend resumes after this one, published or not.
     req.prefix_len = req.extend_end
@@ -415,6 +424,9 @@ def release_kv_cache(req: Req, tree_cache: BasePrefixCache, *, checkpoint: bool)
 
     owned_kv_len = req.owned_kv_len()
     checkpoint = checkpoint and not req.skip_radix_cache_insert
+    # getattr: a Req built without __init__ (tests, synthetic requests) has no
+    # opinion on skip_cache_insert.
+    checkpoint = checkpoint and not getattr(req, "skip_cache_insert", False)
     if checkpoint:
         # A tree that takes over component state (mamba) must see the request
         # finished, or the insert forks the state and the slot leaks.
