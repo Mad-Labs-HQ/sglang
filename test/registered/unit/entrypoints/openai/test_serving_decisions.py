@@ -35,6 +35,7 @@ from sglang.srt.entrypoints.systemone.serving import (
     _score_confidence,
     _view,
 )
+from sglang.srt.environ import envs
 from sglang.srt.managers.tokenizer_manager_score_mixin import TokenizerManagerScoreMixin
 from sglang.srt.parser.template_detection import (
     ReasoningToggleConfig,
@@ -1428,6 +1429,29 @@ class TestSystemOne(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(message, json.loads(response.body)["message"])
         with self.assertRaises(ValidationError):
             _systemone_request(question, x_calibration="calibrated")
+
+    async def test_a_long_shared_prefix_is_prefilled_once_first(self):
+        questions = {
+            f"q{i}": {"type": "noul", "instructions": f"Question {i}"} for i in range(3)
+        }
+        for minimum, expected_calls in ((10**9, 1), (16, 2)):
+            with (
+                self.subTest(minimum=minimum),
+                envs.SGLANG_DECISION_PREFIX_PRIME_MIN_TOKENS.override(minimum),
+            ):
+                manager = ScoringManager(self.tokenizer)
+                request = SystemOneRequest(
+                    state="word " * 200, model="m", questions=questions
+                )
+                response = await self._serving(manager).handle_request(request, None)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(len(manager.requests), expected_calls)
+                scored = manager.requests[-1].input_ids
+                if expected_calls == 2:
+                    prefix = manager.requests[0].input_ids[0]
+                    self.assertGreaterEqual(len(prefix), 200)
+                    self.assertTrue(all(ids[: len(prefix)] == prefix for ids in scored))
+                    self.assertNotEqual(scored[0][len(prefix)], scored[1][len(prefix)])
 
     async def test_reasoning_refusals_apply(self):
         request = _systemone_request(
