@@ -9,14 +9,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-SCRIPT = Path(__file__).parents[4] / "scripts" / "pennyroyal" / "prepare_ple_nvme.py"
+SCRIPT = Path(__file__).parents[1] / "prepare_ple_nvme.py"
 SPEC = importlib.util.spec_from_file_location("prepare_ple_nvme", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
-CHECK_SCRIPT = Path(__file__).parents[4] / "scripts" / "pennyroyal" / "check_ple_nvme.py"
+CHECK_SCRIPT = Path(__file__).parents[1] / "check_ple_nvme.py"
 CHECK_SPEC = importlib.util.spec_from_file_location("check_ple_nvme", CHECK_SCRIPT)
 CHECK = importlib.util.module_from_spec(CHECK_SPEC)
 assert CHECK_SPEC.loader is not None

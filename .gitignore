@@ -285,3 +285,6 @@ artifacts/
 
 # Internal, non-published docs
 internal-docs/
+
+# Optional NVMe PLE reader build (tools/ple_nvme/install.sh)
+.ple-nvme/

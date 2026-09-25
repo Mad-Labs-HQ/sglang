@@ -1,11 +1,10 @@
 # sglang-ssd-stream
 
-> **Pennyroyal users:** this is the retained upstream README for attribution
-> and background, not the installation guide for this adapted package. The
+> **Note:** this is the retained upstream README for attribution and
+> background, not the installation guide for this adapted package. The
 > upstream CLI and replacement-runtime installer are deliberately not exposed.
-> Use [Pennyroyal's NVMe PLE guide](../../../NVME-PLE.md) and its existing
-> Flash-Next launchers. Upstream speed, hardware and setup claims below do not
-> describe Pennyroyal qualification.
+> Use [the NVMe PLE guide](../README.md). Upstream speed, hardware and setup
+> claims below do not describe Pennyroyal or System One qualification.
 
 ## Free 48 GB of RAM. Keep the speed.
 
