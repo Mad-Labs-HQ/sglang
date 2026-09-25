@@ -1031,6 +1031,7 @@ class Req(ReqDllmMixin):
         token_indices_to_pool: Optional[List[int]] = None,
         session_id: Optional[str] = None,
         cache_salt: Optional[str] = None,
+        skip_cache_insert: bool = False,
     ):
         # Input and output info
         self.rid = rid
@@ -1109,6 +1110,12 @@ class Req(ReqDllmMixin):
 
         self.extra_key = extra_key
         self.cache_salt = cache_salt or None
+        # Caller asked us not to publish this request's KV to the prefix cache.
+        # Distinct from skip_radix_cache_insert (a disaggregation- and
+        # beam-search-internal flag that also suppresses the chunked-prefill
+        # bookkeeping); this one only suppresses publication. See
+        # mem_cache/common.py.
+        self.skip_cache_insert = skip_cache_insert
         self.lora_id = lora_id
         self.routing_key = routing_key
 

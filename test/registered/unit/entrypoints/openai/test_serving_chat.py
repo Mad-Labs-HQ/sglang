@@ -728,7 +728,19 @@ class ServingChatTestCase(unittest.TestCase):
         self.assertEqual(adapted.sampling_params["stop"], ["STOP"])
         self.assertEqual(adapted.cache_salt, "tenant-a")
         self.assertEqual(adapted.extra_key, "classification")
+        self.assertFalse(adapted.skip_cache_insert)
         conv_mock.assert_not_called()
+
+    def test_skip_cache_insert_reaches_internal_request(self):
+        self.tm.tokenizer = None
+        req = ChatCompletionRequest(
+            model="x",
+            messages=[{"role": "user", "content": "Hi?"}],
+            input_ids=[101, 102, 103],
+            skip_cache_insert=True,
+        )
+        adapted, _ = self.chat._convert_to_internal_request(req, self.fastapi_request)
+        self.assertTrue(adapted.skip_cache_insert)
 
     def test_kimi_k3_usage_excludes_assistant_generation_stub(self):
         self.chat.chat_encoding_spec = "kimi_k3"

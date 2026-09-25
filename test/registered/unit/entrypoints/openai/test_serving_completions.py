@@ -118,6 +118,17 @@ class ServingCompletionTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "single request"):
             internal.normalize_batch_and_arguments()
 
+    def test_skip_cache_insert_reaches_internal_request(self):
+        req = CompletionRequest(model="x", prompt=[1, 2, 3, 4], max_tokens=1)
+        internal, _ = self.sc._convert_to_internal_request(req)
+        self.assertFalse(internal.skip_cache_insert)
+
+        req = CompletionRequest(
+            model="x", prompt=[1, 2, 3, 4], max_tokens=1, skip_cache_insert=True
+        )
+        internal, _ = self.sc._convert_to_internal_request(req)
+        self.assertTrue(internal.skip_cache_insert)
+
     # ---------- echo-handling ----------
     def test_echo_with_list_of_strings_streaming(self):
         req = CompletionRequest(
