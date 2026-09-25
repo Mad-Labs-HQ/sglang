@@ -46,6 +46,9 @@ _PARSER_TOGGLE_MODES = (
 )
 # Answer text of a finished reply, rendered only to see what precedes an answer.
 _REPLY_SENTINEL = "DECISION_ANSWER"
+# Cached closing suffixes before the cache is cleared. There are a few closing
+# lines, so only request chat_template_kwargs can grow it.
+_MAX_CLOSING_SUFFIXES = 256
 
 
 class QuestionView(msgspec.Struct, frozen=True):
@@ -93,6 +96,12 @@ class OpenAIServingDecisions(OpenAIServingBase):
         # detection finds no config, the one the configured or suggested parser names.
         config = self.template_manager.reasoning_config
         self.reasoning_toggle = config.toggle_param if config is not None else None
+        # Such templates open a reasoning block in every generation prompt, so
+        # answers are read after the empty block the template closes in its replies.
+        self.always_reasons = config is not None and config.always_on
+        # Text each generation prompt is extended by to close an empty reasoning
+        # block, by closing line and chat template kwargs.
+        self._closing_suffixes: Dict[str, Optional[str]] = {}
         if parser is not None:
             try:
                 detector = ReasoningParser(
@@ -173,12 +182,6 @@ class OpenAIServingDecisions(OpenAIServingBase):
         self, chat_template_kwargs: Dict[str, Any]
     ) -> Optional[str]:
         """The answer position must follow the reasoning block, not sit inside it."""
-        config = self.template_manager.reasoning_config
-        if config is not None and config.always_on:
-            return (
-                f"{self.route} does not support chat templates that always "
-                "reason before answering"
-            )
         toggle = self.reasoning_toggle
         if toggle in chat_template_kwargs and chat_template_kwargs[toggle] is not False:
             return (
@@ -233,40 +236,7 @@ class OpenAIServingDecisions(OpenAIServingBase):
     ) -> Tuple[List[int], List[int]]:
         tokenizer = self.tokenizer_manager.tokenizer
         content = _render_question(text=text, view=view, labels=labels)
-        prompt = self._apply_chat_template(content, chat_template_kwargs)
-        if self.reasoning_markers is not None:
-            # Look only after the message, whose last line is fixed text.
-            closing = content.rsplit("\n", 1)[-1]
-            cut = prompt.rfind(closing)
-            generation_prompt = prompt if cut < 0 else prompt[cut + len(closing) :]
-            start, end = self.reasoning_markers
-            opened = generation_prompt.rfind(start)
-            closed = generation_prompt.rfind(end)
-            if opened > closed:
-                raise ValueError(
-                    "the chat template leaves a reasoning block open at the "
-                    "answer position, so this model is not supported with these "
-                    "chat_template_kwargs"
-                )
-            if self.answers_open_reasoning and closed < 0:
-                raise ValueError(
-                    "the reasoning parser for this model expects answers to start "
-                    "with a reasoning block, and the chat template does not close "
-                    "one. Send chat_template_kwargs that turn thinking off, if the "
-                    "template supports it"
-                )
-            # The template's own finished reply shows whether answers start with
-            # a reasoning block that the generation prompt leaves out.
-            reply = self._render_reply(closing, chat_template_kwargs)
-            begin = reply.rfind(closing) if reply is not None else -1
-            answer = reply.find(_REPLY_SENTINEL, begin) if begin >= 0 else -1
-            if answer >= 0 and reply[begin:answer].count(start) > (
-                generation_prompt.count(start)
-            ):
-                raise ValueError(
-                    "the chat template starts every answer with a reasoning "
-                    "block, so this model is not supported"
-                )
+        prompt = self._answer_prompt(content, chat_template_kwargs)
         prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
         # Refuse here because --allow-auto-truncate would cut off the answer position.
         context_len = self.tokenizer_manager.context_len
@@ -284,6 +254,132 @@ class OpenAIServingDecisions(OpenAIServingBase):
         )
         return prompt_ids, label_ids
 
+    def _answer_prompt(self, content: str, chat_template_kwargs: Dict[str, Any]) -> str:
+        """Chat text ending at the answer position: the generation prompt, else that
+        prompt extended to the empty reasoning block the template's own reply closes."""
+        prompt = self._apply_chat_template(content, chat_template_kwargs)
+        # Look only after the message, whose last line is fixed text.
+        closing = content.rsplit("\n", 1)[-1]
+        try:
+            self._check_generation_prompt(prompt, closing, chat_template_kwargs)
+        except ValueError as refusal:
+            if self.reasoning_markers is None:
+                raise
+            suffix = self._closing_suffix(closing, chat_template_kwargs)
+            if suffix is None:
+                raise ValueError(
+                    f"{refusal}, and the chat template's own reply without "
+                    "reasoning does not close an empty reasoning block before "
+                    "the answer"
+                ) from refusal
+            return prompt + suffix
+        return prompt
+
+    def _check_generation_prompt(
+        self, prompt: str, closing: str, chat_template_kwargs: Dict[str, Any]
+    ) -> None:
+        """Refuse a generation prompt whose answer would start inside reasoning."""
+        if self.always_reasons:
+            raise ValueError(
+                f"{self.route} does not support chat templates that always "
+                "reason before answering"
+            )
+        if self.reasoning_markers is None:
+            return
+        cut = prompt.rfind(closing)
+        generation_prompt = prompt if cut < 0 else prompt[cut + len(closing) :]
+        start, end = self.reasoning_markers
+        opened = generation_prompt.rfind(start)
+        closed = generation_prompt.rfind(end)
+        if opened > closed:
+            raise ValueError(
+                "the chat template leaves a reasoning block open at the "
+                "answer position, so this model is not supported with these "
+                "chat_template_kwargs"
+            )
+        if self.answers_open_reasoning and closed < 0:
+            raise ValueError(
+                "the reasoning parser for this model expects answers to start "
+                "with a reasoning block, and the chat template does not close "
+                "one. Send chat_template_kwargs that turn thinking off, if the "
+                "template supports it"
+            )
+        # The template's own finished reply shows whether answers start with
+        # a reasoning block that the generation prompt leaves out.
+        reply = self._render_reply(
+            closing,
+            chat_template_kwargs,
+            {"role": "assistant", "content": _REPLY_SENTINEL},
+        )
+        begin = reply.rfind(closing) if reply is not None else -1
+        answer = reply.find(_REPLY_SENTINEL, begin) if begin >= 0 else -1
+        if answer >= 0 and reply[begin:answer].count(start) > (
+            generation_prompt.count(start)
+        ):
+            raise ValueError(
+                "the chat template starts every answer with a reasoning "
+                "block, so this model is not supported"
+            )
+
+    def _closing_suffix(
+        self, closing: str, chat_template_kwargs: Dict[str, Any]
+    ) -> Optional[str]:
+        """Cached _find_closing_suffix, since it depends only on its arguments."""
+        key = "\0".join(
+            (closing, json.dumps(chat_template_kwargs, sort_keys=True, default=repr))
+        )
+        if key not in self._closing_suffixes:
+            # Request kwargs are unbounded, the closing lines are not.
+            if len(self._closing_suffixes) >= _MAX_CLOSING_SUFFIXES:
+                self._closing_suffixes.clear()
+            self._closing_suffixes[key] = self._find_closing_suffix(
+                closing, chat_template_kwargs
+            )
+        return self._closing_suffixes[key]
+
+    def _find_closing_suffix(
+        self, closing: str, chat_template_kwargs: Dict[str, Any]
+    ) -> Optional[str]:
+        """What a reply with empty reasoning adds to the generation prompt before its
+        answer, or None unless it continues that prompt and closes one empty block."""
+        start, end = self.reasoning_markers
+        try:
+            generation = self._apply_chat_template(closing, chat_template_kwargs)
+        except ValueError:
+            return None
+        reply = self._render_reply(
+            closing,
+            chat_template_kwargs,
+            {"role": "assistant", "content": _REPLY_SENTINEL, "reasoning_content": ""},
+        )
+        if reply is None:
+            return None
+        generation_cut = generation.rfind(closing)
+        reply_cut = reply.rfind(closing)
+        if (
+            generation_cut < 0
+            or reply_cut < 0
+            or generation[:generation_cut] != reply[:reply_cut]
+        ):
+            return None
+        answer = reply.find(_REPLY_SENTINEL, reply_cut + len(closing))
+        if answer < 0:
+            return None
+        generation_tail = generation[generation_cut + len(closing) :]
+        reply_tail = reply[reply_cut + len(closing) : answer]
+        if not reply_tail.startswith(generation_tail):
+            return None
+        opened = reply_tail.rfind(start)
+        closed = reply_tail.rfind(end)
+        if opened < 0 or closed < opened:
+            return None
+        if (
+            reply_tail[opened + len(start) : closed].strip()
+            or reply_tail[closed + len(end) :].strip()
+        ):
+            return None
+        return reply_tail[len(generation_tail) :]
+
     def _apply_chat_template(
         self, content: str, chat_template_kwargs: Dict[str, Any]
     ) -> str:
@@ -298,19 +394,20 @@ class OpenAIServingDecisions(OpenAIServingBase):
             raise ValueError(f"the chat template failed: {e}") from e
 
     def _render_reply(
-        self, message: str, chat_template_kwargs: Dict[str, Any]
+        self,
+        message: str,
+        chat_template_kwargs: Dict[str, Any],
+        reply: Dict[str, str],
     ) -> Optional[str]:
+        """The message and a finished reply, or None when the template refuses them."""
         try:
             return self.tokenizer_manager.tokenizer.apply_chat_template(
-                [
-                    {"role": "user", "content": message},
-                    {"role": "assistant", "content": _REPLY_SENTINEL},
-                ],
+                [{"role": "user", "content": message}, reply],
                 tokenize=False,
                 **chat_template_kwargs,
             )
         except _CHAT_TEMPLATE_CLIENT_ERRORS:
-            # The generation prompt checks above still apply.
+            # Callers treat a refused reply as showing nothing about the answer.
             return None
 
     async def _score(
