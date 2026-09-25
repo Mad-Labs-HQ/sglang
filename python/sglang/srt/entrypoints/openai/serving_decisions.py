@@ -25,8 +25,9 @@ from sglang.srt.entrypoints.openai.protocol import (
 )
 from sglang.srt.entrypoints.openai.serving_base import OpenAIServingBase
 from sglang.srt.entrypoints.openai.serving_chat import _CHAT_TEMPLATE_CLIENT_ERRORS
+from sglang.srt.environ import envs
 from sglang.srt.parser.reasoning_parser import ReasoningParser
-from sglang.srt.runtime_context import get_exec
+from sglang.srt.runtime_context import get_exec, get_memory
 
 if TYPE_CHECKING:
     from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -455,6 +456,7 @@ class OpenAIServingDecisions(OpenAIServingBase):
         temperature: float,
     ):
         """Score encoded prompts in one call, with full-vocabulary label logprobs."""
+        await self._prime_shared_prefix(prompts, raw_request)
         return await self.tokenizer_manager.score_prompts(
             prompts=prompts,
             label_token_ids=label_token_ids,
@@ -462,6 +464,24 @@ class OpenAIServingDecisions(OpenAIServingBase):
             request=raw_request,
             temperature=temperature,
             return_token_logprobs=True,
+        )
+
+    async def _prime_shared_prefix(
+        self, prompts: List[List[int]], raw_request: Request
+    ) -> None:
+        """Prefill the prefix all prompts share once, so the scoring batch reads it
+        from the radix cache instead of every prompt prefilling it again."""
+        if len(prompts) < 2 or get_memory().disable_radix_cache:
+            return
+        prefix = shared_prefix(prompts)
+        if len(prefix) < envs.SGLANG_DECISION_PREFIX_PRIME_MIN_TOKENS.get():
+            return
+        # Scoring a label at the end of the prefix is the cheapest prefill-only request.
+        await self.tokenizer_manager.score_prompts(
+            prompts=[prefix],
+            label_token_ids=[[prefix[-1]]],
+            apply_softmax=False,
+            request=raw_request,
         )
 
     async def _handle_non_streaming_request(
@@ -505,6 +525,15 @@ def render_text(value: Optional[DecisionText]) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def shared_prefix(prompts: List[List[int]]) -> List[int]:
+    """The longest token prefix every prompt starts with."""
+    shortest = min(prompts, key=len)
+    length = len(shortest)
+    for prompt in prompts:
+        length = next((i for i in range(length) if prompt[i] != shortest[i]), length)
+    return shortest[:length]
 
 
 async def encode_all(

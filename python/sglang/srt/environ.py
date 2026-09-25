@@ -670,6 +670,9 @@ class Envs:
     # Registered TreeCore backend serving the unified radix cache.
     SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND = EnvStr("python")
     SGLANG_OPT_SWA_RELEASE_LEAF_LOCK_AFTER_WINDOW = EnvBool(False)
+    # Decision routes prefill a token prefix that all prompts of a request share
+    # once before scoring them, when it is at least this long; raise to disable.
+    SGLANG_DECISION_PREFIX_PRIME_MIN_TOKENS = EnvInt(256)
 
     # ===================================================================
     # PD disaggregation runtime

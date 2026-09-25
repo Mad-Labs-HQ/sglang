@@ -180,7 +180,7 @@ The reply is rendered with an empty reasoning field, trying `reasoning_content`,
 
 These models mix full and linear attention. Answer probabilities can move by up to several hundredths (0.07 in our checks), and `label_mass` by up to about 0.14, between cold and prefix-cached requests and across batch compositions, while the chosen option stayed the same in our checks. On Qwen3.5-35B-A3B, `--disable-radix-cache` gave identical values across sequential repeats, at the cost of prefix reuse.
 
-Models with full attention only drift too. On K2-Horizon-3.7B in BF16, answers to the same prompts in different batches and cache states moved by 0.001 to 0.013 on average, and near ties changed their top answer, as measured under [Calibration](#calibration).
+Models with full attention only drift too. On K2-Horizon-3.7B in BF16, answers to the same prompts in different batches and cache states moved by 0.001 to 0.013 on average, and near ties changed their top answer, as measured under [Calibration](#calibration). The decision routes prefill a prefix shared by all prompts of a request once before scoring them, so every question of a request reads its state from the cache.
 
 ## System One compatible API
 
@@ -225,7 +225,7 @@ What to expect from this route:
 - Unknown top-level fields are ignored. Unknown keys inside a question or inside `noul` criteria are refused, and so are the `/v1/decisions` fields `temperature`, `prompt_format_version`, and `return_prompt_token_ids` with any value other than null. `chat_template_kwargs`, `x_calibration`, and `x_return_reads` are accepted as SGLang extensions.
 - Unlike `/v1/decisions`, an empty `state` and empty or blank question ids are accepted, as the System One schema allows.
 - Invalid requests return 422 with the location of the error, other refusals return 400, and neither is retried by the SDKs.
-- `usage.input_tokens` counts the prompt of every read, so the state is counted once per read of every question, and `usage.output_tokens` is 0.
+- `usage.input_tokens` counts the prompt of every read, so the state is counted once per read of every question, and `usage.output_tokens` is 0. A prefix shared by all reads of a request is prefilled once when it is at least `SGLANG_DECISION_PREFIX_PRIME_MIN_TOKENS` tokens (256 by default), so the state is computed once however many questions ask about it.
 - The SDKs' `models.list()` and response `request_id` are not supported, because `GET /v1/models` keeps its OpenAI format and no request id header is sent.
 - The SDKs time out after 10 seconds and retry, so raise their timeout for requests with many questions over a long state. A request whose client gives up still finishes its encoding and part of its prefill, so each retry repeats at least the encoding.
 
@@ -288,7 +288,7 @@ What to keep in mind:
 - Only fitted profiles make probabilities trustworthy for thresholds, and only for the kind of question they were fitted on: fitted temperatures differ between tasks, and one fitted on one task can raise the error on another.
 - Choice rotations raised K2-Horizon's accuracy by up to 12 points and lowered its NLL and Brier score on every choice task, but raised the calibration error of the emotion task, so the example config leaves them off. Turn them on when accuracy matters more than calibration without labels, or fit a profile on top of them.
 - Content-free priors (asking each question about `N/A`) and the batch prior were measured and not kept: both lowered accuracy on skewed tasks.
-- Reads multiply the prompts per question (two for noul, `k` for choice).
+- Reads multiply the prompts per question (two for noul, `k` for choice), but they share the state, which is prefilled once per request.
 - Answers move slightly with batch composition and prefix caching, as described in [Reproducibility](#reproducibility). On K2-Horizon-3.7B, two runs of the same label-free reads differed by 0.001 to 0.013 in mean probability and 0.02 to 0.08 at the 99th percentile, and the top answer changed on 0.7% to 2.7% of noul and choice questions and on 7% of the score questions, whose level probabilities are flat.
 
 ## Build decisions without `/v1/decisions`
