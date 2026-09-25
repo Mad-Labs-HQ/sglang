@@ -22,6 +22,15 @@ from verify_server import served_log_q
 from sglang.srt.entrypoints.systemone.calibration import decode_config
 
 
+def rotations_of(reads) -> int:
+    """The rotation count a reads config's default choice reads equal."""
+    if reads.choice_max_orders == 1:
+        return 1
+    if reads.choice_orders != "rotations" or reads.choice_max_orders == "all":
+        raise ValueError("the collection has only up to 8 rotations of each question")
+    return reads.choice_max_orders
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--run", required=True)
@@ -35,7 +44,8 @@ def main():
         "noul_case_variants": label_free.noul_case_variants,
         "choice_name_variants": label_free.choice_name_variants,
         "noul_orders": label_free.noul_orders,
-        "choice_rotations": label_free.choice_rotations,
+        # The collection read choice questions in rotations.
+        "choice_rotations": rotations_of(label_free),
         "batch_prior": 0.0,
         "content_free": 0.0,
     }

@@ -24,7 +24,8 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 RAW_READS = {
-    "choice_rotations": 1,
+    "choice_orders": "rotations",
+    "choice_max_orders": 1,
     "choice_name_variants": False,
     "noul_orders": 1,
     "noul_case_variants": False,

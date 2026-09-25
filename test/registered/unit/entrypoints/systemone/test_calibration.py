@@ -8,20 +8,22 @@ import unittest
 import msgspec
 
 from sglang.srt.entrypoints.systemone.calibration import (
-    BUILTIN_MAX_CHOICE_ROTATIONS,
+    BUILTIN_MAX_CHOICE_ORDERS,
     RAW_READS,
     ReadSetup,
     apply_calibration,
+    choice_order_count,
+    choice_orders,
     combine_reads,
     decode_config,
     identity_read,
+    kendall_distance,
     label_variants,
     load_config,
     log_normalize,
     plan_reads,
     read_log_probabilities,
     reads_fingerprint,
-    rotation_offsets,
 )
 from sglang.srt.entrypoints.systemone.calibration_fit import (
     auroc,
@@ -43,7 +45,8 @@ from sglang.test.test_utils import CustomTestCase
 register_cpu_ci(est_time=10, suite="base-a-test-cpu")
 
 LABEL_FREE = ReadSetup(
-    choice_rotations=4,
+    choice_orders="williams",
+    choice_max_orders=4,
     choice_name_variants=True,
     noul_orders=2,
     noul_case_variants=True,
@@ -51,15 +54,65 @@ LABEL_FREE = ReadSetup(
 
 
 class TestReadPlans(CustomTestCase):
-    def test_rotations_are_evenly_spaced_and_nested(self):
-        self.assertEqual(rotation_offsets(4, 4), [0, 1, 2, 3])
-        self.assertEqual(rotation_offsets(3, 8), [0, 1, 2])
-        for n in (5, 6, 26, 77, 255):
+    def test_kendall_distance_counts_discordant_pairs(self):
+        rng = random.Random(0)
+        for _ in range(200):
+            n = rng.randint(1, 8)
+            a, b = list(range(n)), list(range(n))
+            rng.shuffle(a)
+            rng.shuffle(b)
+            brute = sum(
+                (a.index(x) - a.index(y)) * (b.index(x) - b.index(y)) < 0
+                for x in range(n)
+                for y in range(x + 1, n)
+            )
+            self.assertEqual(kendall_distance(a, b), brute)
+
+    def test_full_designs_balance_positions_and_williams_neighbors(self):
+        for n in range(1, 9):
+            for scheme in ("rotations", "williams"):
+                with self.subTest(n=n, scheme=scheme):
+                    orders = choice_orders(scheme, n, n)
+                    self.assertEqual(orders[0], tuple(range(n)))
+                    self.assertEqual(len(set(orders)), n)
+                    # Every option in every position once.
+                    for column in zip(*orders):
+                        self.assertEqual(sorted(column), list(range(n)))
+                    pairs = {(o[i], o[i + 1]) for o in orders for i in range(n - 1)}
+                    if scheme == "williams" and n % 2 == 0:
+                        self.assertEqual(len(pairs), n * (n - 1))
+                    if scheme == "rotations" and n > 2:
+                        # Each option always has the same neighbors.
+                        self.assertEqual(len(pairs), n)
+
+    def test_partial_sets_are_the_most_discordant_and_nested(self):
+        # The most discordant second order: a half shift, or the full reversal.
+        self.assertEqual(choice_orders("rotations", 8, 2)[1], (4, 5, 6, 7, 0, 1, 2, 3))
+        self.assertEqual(choice_orders("williams", 6, 2)[1], (5, 4, 3, 2, 1, 0))
+        for scheme in ("rotations", "williams"):
+            eight = choice_orders(scheme, 77, 8)
             for k in (1, 2, 4):
-                with self.subTest(n=n, k=k):
-                    self.assertLessEqual(
-                        set(rotation_offsets(n, k)), set(rotation_offsets(n, 2 * k))
-                    )
+                self.assertEqual(choice_orders(scheme, 77, k), eight[:k])
+            nearest = [
+                min(kendall_distance(o, c) for c in eight[:i])
+                for i, o in enumerate(eight)
+                if i
+            ]
+            # Greedy growth: each added order is at least as far as any later one.
+            self.assertEqual(nearest, sorted(nearest, reverse=True))
+
+    def test_order_counts_follow_the_max(self):
+        def setup(max_orders):
+            return msgspec.structs.replace(LABEL_FREE, choice_max_orders=max_orders)
+
+        self.assertEqual(choice_order_count(setup("all"), 5), 5)
+        self.assertEqual(choice_order_count(setup(20), 3), 3)
+        self.assertEqual(choice_order_count(setup(4), 77), 4)
+        reads = plan_reads("choice", ["A", "B", "C"], setup("all"))
+        self.assertEqual(
+            [r.order for r in reads], list(choice_orders("williams", 3, 3))
+        )
+        self.assertTrue(all(r.labels == ("A", "B", "C") for r in reads))
 
     def test_raw_reads_are_the_single_decisions_read(self):
         for kind, labels in (
@@ -72,12 +125,6 @@ class TestReadPlans(CustomTestCase):
                     plan_reads(kind, labels, RAW_READS), [identity_read(labels)]
                 )
                 self.assertEqual(label_variants(kind, labels[0], "name", RAW_READS), [])
-
-    def test_choice_rotations_keep_labels_by_position(self):
-        setup = msgspec.structs.replace(LABEL_FREE, choice_rotations=2)
-        reads = plan_reads("choice", ["A", "B", "C"], setup)
-        self.assertEqual([r.order for r in reads], [(0, 1, 2), (1, 2, 0)])
-        self.assertTrue(all(r.labels == ("A", "B", "C") for r in reads))
 
     def test_noul_orders_swap_the_labels_shown(self):
         reads = plan_reads("yes_no", ["yes", "no"], LABEL_FREE)
@@ -235,10 +282,8 @@ class TestMetrics(CustomTestCase):
 
 class TestConfig(CustomTestCase):
     def _config(self, **overrides):
-        body = {
-            "default_reads": msgspec.structs.asdict(LABEL_FREE),
-            "max_choice_rotations": 8,
-        }
+        reads = {**msgspec.structs.asdict(LABEL_FREE), "choice_max_orders": 4}
+        body = {"default_reads": reads, "max_choice_orders": 8}
         body.update(overrides)
         return json.dumps(body).encode()
 
@@ -246,40 +291,57 @@ class TestConfig(CustomTestCase):
         self.assertEqual(decode_config(self._config()).default_reads, LABEL_FREE)
         builtin = load_config(None)
         self.assertEqual(builtin.default_reads, RAW_READS)
-        self.assertEqual(builtin.max_choice_rotations, BUILTIN_MAX_CHOICE_ROTATIONS)
+        self.assertEqual(builtin.max_choice_orders, BUILTIN_MAX_CHOICE_ORDERS)
         body = json.loads(self._config())
         del body["default_reads"]["noul_orders"]
+        reads = msgspec.structs.asdict(LABEL_FREE)
         cases = {
             "missing field": json.dumps(body).encode(),
             "unknown field": self._config(fitted=None),
-            "orders above 2": self._config(
-                default_reads={**msgspec.structs.asdict(LABEL_FREE), "noul_orders": 3}
+            "orders above 2": self._config(default_reads={**reads, "noul_orders": 3}),
+            "unknown scheme": self._config(
+                default_reads={**reads, "choice_orders": "random"}
             ),
         }
         for name, data in cases.items():
             with self.subTest(name), self.assertRaises(msgspec.ValidationError):
                 decode_config(data)
-        with self.assertRaises(ValueError):
-            decode_config(self._config(max_choice_rotations=2))
+        # Default reads must fit the cap, so clients that cannot choose are never refused.
+        for default_max in ("all", 9):
+            with self.subTest(default_max), self.assertRaises(ValueError):
+                decode_config(
+                    self._config(
+                        default_reads={**reads, "choice_max_orders": default_max}
+                    )
+                )
 
     def test_fingerprints_cover_what_a_calibration_depends_on(self):
-        def fingerprint(kind, setup=LABEL_FREE, model="m", revision="r", version=1):
-            return reads_fingerprint(kind, setup, model, revision, version)
+        def fingerprint(kind, options=4, model="m", **fields):
+            setup = msgspec.structs.replace(LABEL_FREE, **fields)
+            return reads_fingerprint(kind, options, setup, model, "r", 1)
 
-        more_rotations = msgspec.structs.replace(LABEL_FREE, choice_rotations=2)
-        one_order = msgspec.structs.replace(LABEL_FREE, noul_orders=1)
-        self.assertNotEqual(
-            fingerprint("choice"), fingerprint("choice", more_rotations)
+        base = fingerprint("choice")
+        self.assertNotEqual(base, fingerprint("choice", choice_max_orders=2))
+        self.assertNotEqual(base, fingerprint("choice", choice_orders="rotations"))
+        self.assertNotEqual(base, fingerprint("choice", options=5))
+        self.assertNotEqual(base, fingerprint("choice", model="other"))
+        # The same reads however the setup spells them.
+        self.assertEqual(base, fingerprint("choice", choice_max_orders="all"))
+        self.assertEqual(base, fingerprint("choice", choice_max_orders=20))
+        self.assertEqual(
+            fingerprint("choice", choice_max_orders=1),
+            fingerprint("choice", choice_max_orders=1, choice_orders="rotations"),
         )
-        self.assertEqual(fingerprint("yes_no"), fingerprint("yes_no", more_rotations))
-        self.assertNotEqual(fingerprint("yes_no"), fingerprint("yes_no", one_order))
-        self.assertEqual(fingerprint("score"), fingerprint("score", one_order))
-        for other in (
-            fingerprint("choice", model="other"),
-            fingerprint("choice", revision="other"),
-            fingerprint("choice", version=2),
-        ):
-            self.assertNotEqual(fingerprint("choice"), other)
+        # Choice orders do not touch noul reads, nor noul settings choice reads.
+        self.assertEqual(
+            fingerprint("yes_no", options=2),
+            fingerprint("yes_no", options=2, choice_max_orders=2),
+        )
+        self.assertNotEqual(
+            fingerprint("yes_no", options=2),
+            fingerprint("yes_no", options=2, noul_orders=1),
+        )
+        self.assertEqual(base, fingerprint("choice", noul_orders=1))
 
 
 if __name__ == "__main__":
