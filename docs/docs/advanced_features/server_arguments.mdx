@@ -1133,6 +1133,12 @@ Combining `--enable-response-store` with `--disaggregation-mode=prefill` or `dec
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Type: JSON / Dict</td>
     </tr>
         <tr>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--decision-calibration-config`</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Path of a JSON calibration config for <code>/v1/systemone</code>: the default calibration mode (<code>raw</code>, <code>label_free</code>, or <code>fitted</code>), the label-free reads, and optional fitted profiles written by <code>python -m sglang.srt.entrypoints.systemone.fit_calibration</code>. Without it, answers are raw label probabilities. Profiles fitted for another model, revision, or set of reads are refused at startup. See [Decision models](/docs/supported-models/decision_models#calibration).</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`None`</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Type: str</td>
+    </tr>
+        <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--completion-template`</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>The builtin completion template name or the path of the completion template file. This is only used for OpenAI-compatible API server. only for code completion currently.</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`None`</td>

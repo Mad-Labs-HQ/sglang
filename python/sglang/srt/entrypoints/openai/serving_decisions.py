@@ -81,7 +81,7 @@ class OpenAIServingDecisions(OpenAIServingBase):
         self.chat_encoding_spec = chat_serving.chat_encoding_spec
         self.prompt_text_is_lossy = chat_serving._prompt_text_round_trip_is_lossy
         tokenizer = self.tokenizer_manager.tokenizer
-        # Other tokenizers skip the shortcut in _encode_labels and check the full prompt.
+        # Other tokenizers skip the shortcut in encode_labels and check the full prompt.
         self.added_tokens = (
             {i: token for token, i in tokenizer.get_added_vocab().items()}
             if isinstance(tokenizer, PreTrainedTokenizerBase)
@@ -237,10 +237,25 @@ class OpenAIServingDecisions(OpenAIServingBase):
         labels: List[str],
         chat_template_kwargs: Dict[str, Any],
     ) -> Tuple[List[int], List[int]]:
-        tokenizer = self.tokenizer_manager.tokenizer
-        content = _render_question(text=text, view=view, labels=labels)
+        content = render_question(text=text, view=view, labels=labels)
+        prompt, prompt_ids = self._encode_prompt(content, chat_template_kwargs)
+        label_ids = encode_labels(
+            tokenizer=self.tokenizer_manager.tokenizer,
+            prompt=prompt,
+            prompt_ids=prompt_ids,
+            labels=labels,
+            added_tokens=self.added_tokens,
+        )
+        return prompt_ids, label_ids
+
+    def _encode_prompt(
+        self, content: str, chat_template_kwargs: Dict[str, Any]
+    ) -> Tuple[str, List[int]]:
+        """Answer prompt of one message, as text and ids, that fits the context."""
         prompt = self._answer_prompt(content, chat_template_kwargs)
-        prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+        prompt_ids = self.tokenizer_manager.tokenizer.encode(
+            prompt, add_special_tokens=False
+        )
         # Refuse here because --allow-auto-truncate would cut off the answer position.
         context_len = self.tokenizer_manager.context_len
         if len(prompt_ids) + self.tokenizer_manager.num_reserved_tokens >= context_len:
@@ -248,14 +263,7 @@ class OpenAIServingDecisions(OpenAIServingBase):
                 f"the prompt has {len(prompt_ids)} tokens, which does not fit "
                 f"the context length of {context_len} tokens"
             )
-        label_ids = _encode_labels(
-            tokenizer=tokenizer,
-            prompt=prompt,
-            prompt_ids=prompt_ids,
-            labels=labels,
-            added_tokens=self.added_tokens,
-        )
-        return prompt_ids, label_ids
+        return prompt, prompt_ids
 
     def _answer_prompt(self, content: str, chat_template_kwargs: Dict[str, Any]) -> str:
         """Chat text ending at the answer position: the generation prompt, else that
@@ -430,8 +438,24 @@ class OpenAIServingDecisions(OpenAIServingBase):
         temperature: float = 1.0,
     ):
         """Encode every question, then score them all in one call."""
-        prompts, label_token_ids = await _encode_all(adapted_request)
-        result = await self.tokenizer_manager.score_prompts(
+        prompts, label_token_ids = await encode_all(adapted_request)
+        result = await self._score_prompts(
+            prompts=prompts,
+            label_token_ids=label_token_ids,
+            raw_request=raw_request,
+            temperature=temperature,
+        )
+        return prompts, label_token_ids, result
+
+    async def _score_prompts(
+        self,
+        prompts: List[List[int]],
+        label_token_ids: List[List[int]],
+        raw_request: Request,
+        temperature: float,
+    ):
+        """Score encoded prompts in one call, with full-vocabulary label logprobs."""
+        return await self.tokenizer_manager.score_prompts(
             prompts=prompts,
             label_token_ids=label_token_ids,
             apply_softmax=True,
@@ -439,7 +463,6 @@ class OpenAIServingDecisions(OpenAIServingBase):
             temperature=temperature,
             return_token_logprobs=True,
         )
-        return prompts, label_token_ids, result
 
     async def _handle_non_streaming_request(
         self,
@@ -484,7 +507,7 @@ def render_text(value: Optional[DecisionText]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-async def _encode_all(
+async def encode_all(
     encoded: Iterator[Tuple[List[int], List[int]]],
 ) -> Tuple[List[List[int]], List[List[int]]]:
     """Collect prompt and label ids, letting other requests run between questions."""
@@ -527,7 +550,7 @@ def default_labels(view: QuestionView) -> List[str]:
     return list(view.names)
 
 
-def _render_question(text: str, view: QuestionView, labels: List[str]) -> str:
+def render_question(text: str, view: QuestionView, labels: List[str]) -> str:
     """Prompt wording of PROMPT_FORMAT_VERSION."""
     # Every /v1/decisions question has text. A question without its own text
     # drops the question line, and a yes or no question keeps its lead in.
@@ -559,7 +582,8 @@ def _render_question(text: str, view: QuestionView, labels: List[str]) -> str:
             detail = render_text(description)
             if detail:
                 lines.append(f"{label}: {detail}")
-        lines.append("Answer with yes or no only.")
+        # Labels come in the order shown, which a calibration read can reverse.
+        lines.append(f"Answer with {labels[0]} or {labels[1]} only.")
     return "\n".join([text, "", *lines])
 
 
@@ -600,7 +624,17 @@ def label_token_id(
     return ids[-1]
 
 
-def _encode_labels(
+def first_token_id(
+    tokenizer: Any, text: str, text_ids: List[int], continuation: str
+) -> Optional[int]:
+    """The first token a continuation adds after the text, or None when it adds none."""
+    ids = tokenizer.encode(text + continuation, add_special_tokens=False)
+    if len(ids) <= len(text_ids) or ids[: len(text_ids)] != text_ids:
+        return None
+    return ids[len(text_ids)]
+
+
+def encode_labels(
     tokenizer: Any,
     prompt: str,
     prompt_ids: List[int],

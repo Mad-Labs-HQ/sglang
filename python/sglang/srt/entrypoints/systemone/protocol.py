@@ -96,6 +96,10 @@ class SystemOneRequest(BaseModel):
     questions: Dict[str, SystemOneQuestion] = Field(min_length=1)
     # SGLang extension, for chat templates whose reasoning toggle needs a kwarg.
     chat_template_kwargs: Dict[str, Any] = Field(default_factory=dict)
+    # SGLang extensions: the calibration mode, the server default when not sent,
+    # and whether answers include the label logprobs of every read.
+    x_calibration: Optional[Literal["raw", "label_free", "fitted"]] = None
+    x_return_reads: bool = False
 
     # /v1/decisions fields, which would change the answers if honored or ignored.
     # Declared only to refuse them by name, and hidden from the schema.
@@ -113,11 +117,29 @@ class SystemOneRequest(BaseModel):
         return value
 
 
+class SystemOneRead(BaseModel):
+    """One scored prompt of a question, an SGLang extension."""
+
+    # Option names in the order the prompt shows them, with their labels.
+    order: List[str]
+    labels: List[str]
+    # Per option name, the texts scored for it and their full-vocabulary logprobs.
+    texts: Dict[str, List[str]]
+    logprobs: Dict[str, List[float]]
+
+
+# Answer fields are declared per type so the published fields come first.
+# x_label_mass is the full-vocabulary probability of the answer labels,
+# x_calibration the calibration mode applied, and x_reads every read of the
+# question when the request sets x_return_reads, all SGLang extensions.
+
+
 class SystemOneNoulAnswer(BaseModel):
     type: Literal["noul"] = "noul"
     noul: float
-    # Full-vocabulary probability of the answer labels, an SGLang extension.
     x_label_mass: float
+    x_calibration: Literal["raw", "label_free", "fitted"]
+    x_reads: Optional[List[SystemOneRead]] = None
 
 
 class SystemOneChoiceAnswer(BaseModel):
@@ -126,6 +148,8 @@ class SystemOneChoiceAnswer(BaseModel):
     confidence: float
     probabilities: Dict[str, float]
     x_label_mass: float
+    x_calibration: Literal["raw", "label_free", "fitted"]
+    x_reads: Optional[List[SystemOneRead]] = None
 
 
 class SystemOneScoreAnswer(BaseModel):
@@ -135,6 +159,8 @@ class SystemOneScoreAnswer(BaseModel):
     legend: Dict[str, Any]
     probabilities: Dict[str, float]
     x_label_mass: float
+    x_calibration: Literal["raw", "label_free", "fitted"]
+    x_reads: Optional[List[SystemOneRead]] = None
 
 
 class SystemOneUsage(BaseModel):
