@@ -174,7 +174,7 @@ Qwen3.8-27B and Qwen3.5-35B-A3B think by default. `/v1/decisions` turns thinking
 
 Some chat templates cannot turn thinking off: K2-Horizon's opens a reasoning block (`<ifm|think>`) in every generation prompt. When the rendered prompt would put the answer inside a reasoning block, the server renders the template's own finished reply with empty reasoning and, if that reply continues the generation prompt and closes one empty block followed only by whitespace before the answer, extends the prompt by that text. For K2-Horizon the prompt then ends with `<ifm|think>\n</ifm|think>`, which is how the template itself renders an answer without reasoning. Answers read this way skip the reasoning the model would otherwise do, so expect lower accuracy than chat with reasoning on hard questions.
 
-The reply is rendered with `reasoning_content` set to an empty string, so K2-Horizon answers after the `<ifm|think>` pair. A `reasoning_effort` other than `high` in `chat_template_kwargs` or `--default-chat-template-kwargs` opens a different pair in the generation prompt, which that reply does not continue, and the request is refused.
+The reply is rendered with an empty reasoning field, trying `reasoning_content`, `reasoning`, `thinking`, and `think` in that order until one closes a block, so K2-Horizon answers after the `<ifm|think>` pair. A `reasoning_effort` other than `high` in `chat_template_kwargs` or `--default-chat-template-kwargs` opens a different pair in the generation prompt, which that reply does not continue, and the request is refused.
 
 ## Reproducibility
 

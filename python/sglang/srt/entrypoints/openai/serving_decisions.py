@@ -46,6 +46,9 @@ _PARSER_TOGGLE_MODES = (
 )
 # Answer text of a finished reply, rendered only to see what precedes an answer.
 _REPLY_SENTINEL = "DECISION_ANSWER"
+# Message fields that chat templates read reasoning from, tried in this order
+# to render a reply whose reasoning is empty.
+_REASONING_FIELDS = ("reasoning_content", "reasoning", "thinking", "think")
 # Cached closing suffixes before the cache is cleared. There are a few closing
 # lines, so only request chat_template_kwargs can grow it.
 _MAX_CLOSING_SUFFIXES = 256
@@ -342,18 +345,28 @@ class OpenAIServingDecisions(OpenAIServingBase):
     ) -> Optional[str]:
         """What a reply with empty reasoning adds to the generation prompt before its
         answer, or None unless it continues that prompt and closes one empty block."""
-        start, end = self.reasoning_markers
         try:
             generation = self._apply_chat_template(closing, chat_template_kwargs)
         except ValueError:
             return None
-        reply = self._render_reply(
-            closing,
-            chat_template_kwargs,
-            {"role": "assistant", "content": _REPLY_SENTINEL, "reasoning_content": ""},
-        )
+        for field in _REASONING_FIELDS:
+            reply = self._render_reply(
+                closing,
+                chat_template_kwargs,
+                {"role": "assistant", "content": _REPLY_SENTINEL, field: ""},
+            )
+            suffix = self._empty_block_suffix(closing, generation, reply)
+            if suffix is not None:
+                return suffix
+        return None
+
+    def _empty_block_suffix(
+        self, closing: str, generation: str, reply: Optional[str]
+    ) -> Optional[str]:
+        """What the reply adds to the generation prompt, if it closes one empty block."""
         if reply is None:
             return None
+        start, end = self.reasoning_markers
         generation_cut = generation.rfind(closing)
         reply_cut = reply.rfind(closing)
         if (

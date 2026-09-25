@@ -881,6 +881,22 @@ class TestAlwaysReasoningTemplates(unittest.IsolatedAsyncioTestCase):
                 ],
             )
 
+    async def test_templates_that_read_reasoning_from_another_field(self):
+        # This template renders an empty block only from `think`, with a newline after.
+        tokenizer = AutoTokenizer.from_pretrained("IFM/K2-Horizon-0.9B")
+        manager = ScoringManager(tokenizer, architecture=ALWAYS_REASONING_ARCHITECTURE)
+        request = _request("s", {"q": _question("choice", {"a": None, "b": None})})
+        response = await _handler(manager).handle_request(request, None)
+        self.assertEqual(response.status_code, 200)
+        prompt = tokenizer.decode(manager.requests[0].input_ids[0])
+        self.assertTrue(
+            prompt.endswith("assistant\n<ifm|think>\n</ifm|think>\n"), prompt[-60:]
+        )
+        self.assertEqual(
+            manager.requests[0].token_ids_logprob[0],
+            [tokenizer.encode(label, add_special_tokens=False)[0] for label in "AB"],
+        )
+
     async def test_systemone_labels_more_than_26_options(self):
         manager = self._manager()
         names = [f"option {i}" for i in range(60)]
