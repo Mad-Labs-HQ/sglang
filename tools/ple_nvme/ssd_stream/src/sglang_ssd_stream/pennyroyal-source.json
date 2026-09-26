@@ -1,10 +1,10 @@
 {
-  "source": "madlabs/systemone-prod@d18f27429b",
+  "source": "madlabs/systemone-prod@50b964c017",
   "modules": {
     "sglang.srt.layers.attention.qsa.kernel": "d0c7b61dce8b1440a2ea785fa87bb4ce7c06e608c7cda61469b28d594da65146",
     "sglang.srt.layers.attention.qsa.sparse_attn": "1628f0980ea78eeabccc8dfbee3f6e82f17bde89fb07e3b400b3b4629249aba6",
     "sglang.srt.layers.attention.qwen_sparse_attn_backend": "feea3aa2c1f099ef42fd4ac833e2ca13f0566ab68ab078a2886880b02ef22cf8",
-    "sglang.srt.models.qwen4_exp": "c678c3c9a449b434a795238a25a39575a8f022a00300a4d4a198a0690893bf0a",
+    "sglang.srt.models.qwen4_exp": "e75d79e3eb21db5ab11028bcbccc8647c2633c6003435fed6fcae070fb6d691f",
     "sglang.srt.models.qwen3_5": "3dbf4bf458797875abbfc60949d1d9cfd599b4aa8cd072b7af043aab7841efa7",
     "sglang.srt.model_executor.runner.decode_cuda_graph_runner": "f1d474404577c6817e2029d0ea2513782835294a8fc4eafab5787a2264810290",
     "sglang.srt.server_args": "1dc6d150bf7c4ef5c2316c2ce21ca28ea557ac26fcdb150d21ac48fff1a784e6",

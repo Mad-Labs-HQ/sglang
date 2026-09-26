@@ -71,7 +71,8 @@ SHA as well.
 The reader registers its hooks only when every SGLang module listed in
 `ssd_stream/src/sglang_ssd_stream/pennyroyal-source.json` is byte-identical to
 the copy the adapter was reviewed against. That copy is currently
-`madlabs/systemone-prod@d18f27429b`. If a rebase changes one of those modules,
+`madlabs/systemone-prod@50b964c017` (the SM120 online-MXFP8 port on
+`madlabs/systemone-online-mxfp8`). If a rebase changes one of those modules,
 NVMe startup and `tests/test_source_guard.py` fail, and nothing runs
 unguarded. To accept the new code:
 
