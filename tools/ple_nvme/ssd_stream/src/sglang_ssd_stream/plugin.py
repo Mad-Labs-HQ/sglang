@@ -200,7 +200,7 @@ def _register() -> None:
             configure_cli,
         ),
         (
-            "sglang.srt.models.qwen3_5.make_layers",
+            "sglang.srt.models.qwen3_5.make_pp_layers",
             HookType.AROUND,
             around_make_layers,
         ),

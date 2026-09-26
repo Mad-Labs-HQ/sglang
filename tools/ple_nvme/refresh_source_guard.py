@@ -9,7 +9,7 @@ offload.py, backend.py) against the new code, then re-pin, bump the package
 version and reinstall the reader with install.sh.
 
     python tools/ple_nvme/refresh_source_guard.py --check
-    python tools/ple_nvme/refresh_source_guard.py --source madlabs/systemone-prod@<sha>
+    python tools/ple_nvme/refresh_source_guard.py --source madlabs/main@<sha>
 """
 
 import argparse
