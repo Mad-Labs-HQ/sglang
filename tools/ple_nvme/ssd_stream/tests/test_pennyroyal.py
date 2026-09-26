@@ -7,7 +7,7 @@ from sglang_ssd_stream import __version__, config, plugin
 
 REQUIRED_HOOK_TARGETS = (
     "sglang.srt.server_args.ServerArgs.from_cli_args",
-    "sglang.srt.models.qwen3_5.make_layers",
+    "sglang.srt.models.qwen3_5.make_pp_layers",
     "sglang.srt.models.qwen4_exp.Qwen4ExpPLELayer",
     "sglang.srt.models.qwen4_exp.Qwen4ExpForConditionalGeneration.load_weights",
     (
@@ -22,7 +22,7 @@ REQUIRED_HOOK_TARGETS = (
 
 
 def test_corrected_adapter_version_is_explicit():
-    assert __version__ == "0.2.0+systemone1"
+    assert __version__ == "0.2.0+systemone3"
 
 
 @pytest.fixture

@@ -16,7 +16,7 @@ GUARD = (
 
 def test_source_guard_matches_every_hooked_publication_module():
     guard = json.loads(GUARD.read_text())
-    assert guard["source"].startswith("madlabs/systemone-prod@")
+    assert guard["source"].startswith("madlabs/main@")
     assert "sglang.srt.models.qwen4_exp" in guard["modules"]
 
     for module, expected in guard["modules"].items():

@@ -71,13 +71,13 @@ SHA as well.
 The reader registers its hooks only when every SGLang module listed in
 `ssd_stream/src/sglang_ssd_stream/pennyroyal-source.json` is byte-identical to
 the copy the adapter was reviewed against. That copy is currently
-`madlabs/systemone-prod@d18f27429b`. If a rebase changes one of those modules,
-NVMe startup and `tests/test_source_guard.py` fail, and nothing runs
-unguarded. To accept the new code:
+`madlabs/main@84f09ea980` (madlabs/main rebased onto upstream f6fcda8827).
+If a rebase changes one of those modules, NVMe startup and
+`tests/test_source_guard.py` fail, and nothing runs unguarded. To accept the new code:
 
 1. Review `qwen4.py`, `graph.py`, `config.py`, `offload.py` and `backend.py`
    against the changed modules.
-2. Run `python tools/ple_nvme/refresh_source_guard.py --source madlabs/systemone-prod@<sha>`.
+2. Run `python tools/ple_nvme/refresh_source_guard.py --source madlabs/main@<sha>`.
 3. Bump the `+systemoneN` version in `pyproject.toml`, `Cargo.toml`,
    `__init__.py`, `check_ple_nvme.py` and `tests/test_pennyroyal.py`.
 4. Reinstall into a fresh `PENNY_PLE_PLUGIN_DIR`.
