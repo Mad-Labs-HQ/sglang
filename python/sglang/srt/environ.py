@@ -1011,6 +1011,10 @@ class Envs:
     SGLANG_FORCE_MXFP8_BLOCK_CONVERT_DENSE = EnvBool(False)
     SGLANG_FP8_IGNORED_LAYERS = EnvStr("")
     SGLANG_FP4_IGNORED_LAYERS = EnvStr("")
+    # Opt-in Flash-Next-only conversion of eligible BF16 projections on exact
+    # SM120. Large linears use MXFP8; lm_head and HyperConnection mix weights
+    # use rowwise weight-only FP8. An explicit unsupported request fails boot.
+    SGLANG_SM120_ONLINE_MXFP8 = EnvBool(False)
     # On by default; set SGLANG_ENABLE_FP8_GEMM_CONFIG_TUNE=0 as a kill switch.
     # Consults the tuned per-(N, K, M) Triton tile config table in
     # apply_fp8_linear. When a tuned config exists for this GPU / weight shape /
