@@ -1304,6 +1304,9 @@ class Qwen4ExpPLELayer(nn.Module):
         return _pad_token_rows(output, batch.physical_tokens)
 
 
+_ONLINE_MXFP8_LOGGED_SIGNATURES = set()
+
+
 class Qwen4ExpLayerExtensionMixin:
     def _init_qwen4_exp_layer_extensions(
         self,
@@ -1352,11 +1355,81 @@ class Qwen4ExpLayerExtensionMixin:
             hc_config,
             use_mix=True,
             use_combine=True,
+            online_fp8=True,
         )
         self.mlp_hyper_connection = GatedResidual(
             hc_config,
             use_mix=True,
             use_combine=True,
+            online_fp8=True,
+        )
+        self._maybe_convert_linears_to_mxfp8()
+
+    def _maybe_convert_linears_to_mxfp8(self) -> None:
+        """Convert only Flash-Next's eligible, otherwise-unquantized linears."""
+        from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+            convert_eligible_linears_to_mxfp8,
+            online_fp8_enabled,
+        )
+
+        if not online_fp8_enabled():
+            return
+
+        from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
+        from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
+
+        def build_method():
+            class CheckedOnlineMxfp8LinearMethod(Fp8LinearMethod):
+                def process_weights_after_loading(self, module) -> None:
+                    super().process_weights_after_loading(module)
+                    scale = getattr(module, "weight_scale_inv", None)
+                    if (
+                        module.weight.dtype != torch.float8_e4m3fn
+                        or scale is None
+                        or scale.dtype != torch.uint8
+                        or not getattr(scale, "format_ue8m0", False)
+                    ):
+                        raise RuntimeError(
+                            "Flash-Next online MXFP8 post-processing produced "
+                            f"invalid weight/scale state for {type(module).__name__}"
+                        )
+                    signature = (
+                        type(module).__name__,
+                        tuple(module.weight.shape),
+                        str(self.mxfp8_dense_backend),
+                    )
+                    if signature not in _ONLINE_MXFP8_LOGGED_SIGNATURES:
+                        _ONLINE_MXFP8_LOGGED_SIGNATURES.add(signature)
+                        logger.info(
+                            "Flash-Next online MXFP8 projection ready: "
+                            "module=%s shape=%s backend=%s scale=UE8M0",
+                            *signature,
+                        )
+
+            method = CheckedOnlineMxfp8LinearMethod(
+                Fp8Config(
+                    is_checkpoint_fp8_serialized=False,
+                    activation_scheme="dynamic",
+                    use_mxfp8=True,
+                )
+            )
+            if method.mxfp8_dense_backend is None or (
+                method.mxfp8_dense_backend.is_unsupported()
+            ):
+                raise RuntimeError(
+                    "SGLANG_SM120_ONLINE_MXFP8 was selected but no MXFP8 dense "
+                    "kernel is available"
+                )
+            return method
+
+        self._online_mxfp8_linears = convert_eligible_linears_to_mxfp8(
+            self,
+            enabled=True,
+            method_factory=build_method,
+            unquantized_method_type=UnquantizedLinearMethod,
+            # PLE storage and its projection path remain exactly as configured;
+            # online FP8 is bounded to the transformer projections here.
+            excluded_module_type=(FusedMoE, Qwen4ExpPLELayer),
         )
 
     def _prepare_qwen4_exp_attn(
@@ -1707,7 +1780,7 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
             hc_per_branch_norm=True,
         )
         self.hyper_connection_mixer = (
-            GatedResidual(hc_config, use_combine=False)
+            GatedResidual(hc_config, use_combine=False, online_fp8=True)
             if self.pp_group.is_last_rank
             else PPMissingLayer()
         )
@@ -1915,6 +1988,41 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
         buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
         loaded_buffers.add(name)
         return True
+
+    def post_load_weights(self) -> None:
+        """Install the final rowwise-FP8 head before draft head sharing."""
+        from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+            online_fp8_enabled,
+            replace_linear_weight_rowwise_fp8,
+            rowwise_scale_of,
+        )
+
+        if not online_fp8_enabled():
+            return
+        if self.config.tie_word_embeddings:
+            raise RuntimeError(
+                "SGLANG_SM120_ONLINE_MXFP8 does not support tied input/lm_head weights"
+            )
+        if self.pp_group.is_last_rank:
+            replace_linear_weight_rowwise_fp8(self.lm_head)
+        hc_weights = 0
+        for module in self.modules():
+            if not getattr(module, "_online_fp8_mix", False):
+                continue
+            for name in ("input_mix_weight_down", "input_mix_weight_up"):
+                weight = getattr(module, name).weight
+                if rowwise_scale_of(weight) is None:
+                    raise RuntimeError(
+                        "Flash-Next online FP8 HyperConnection weight is missing "
+                        "its rowwise scale after load"
+                    )
+                hc_weights += 1
+        logger.info(
+            "Flash-Next rowwise FP8 weights ready: hc_mix=%d lm_head=%d; "
+            "GDN recurrent-state allocation remains unchanged",
+            hc_weights,
+            int(self.pp_group.is_last_rank),
+        )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -2285,6 +2393,10 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
         for module in self.modules():
             if isinstance(module, Qwen3_5GatedDeltaNet):
                 module.finalize_fused_in_proj()
+
+        # Loaders that go through load_weights() do not call the model hook
+        # themselves; it is idempotent for the ones that do (dummy, remote).
+        self.post_load_weights()
 
         return loaded_params
 
