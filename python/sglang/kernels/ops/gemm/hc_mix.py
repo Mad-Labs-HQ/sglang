@@ -31,6 +31,8 @@ def _hc_mix_persistent_kernel(
     t_raw_ptr,
     out_ptr,
     counters_ptr,
+    down_scale_ptr,
+    up_scale_ptr,
     K,
     LOWRANK,
     HS,
@@ -43,6 +45,7 @@ def _hc_mix_persistent_kernel(
     BLOCK_K: tl.constexpr,
     BLOCK_J: tl.constexpr,
     BLOCK_R: tl.constexpr,
+    FP8_WEIGHT: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs_m = tl.arange(0, ROWS)
@@ -75,7 +78,12 @@ def _hc_mix_persistent_kernel(
             mask=mask_n[:, None],
             other=0.0,
         )
+        if FP8_WEIGHT:
+            w = w.to(x_ptr.dtype.element_ty)
         acc = tl.dot(xt, tl.trans(w))
+        if FP8_WEIGHT:
+            row_scale = tl.load(down_scale_ptr + n, mask=mask_n, other=0.0)
+            acc *= row_scale[None, :]
         tl.atomic_add(
             t_raw_ptr + offs_m[:, None] * LOWRANK + n[None, :],
             acc,
@@ -113,7 +121,12 @@ def _hc_mix_persistent_kernel(
                 mask=mask_gj[:, None] & mask_r[None, :],
                 other=0.0,
             )
+            if FP8_WEIGHT:
+                w = w.to(x_ptr.dtype.element_ty)
             acc = tl.dot(t, tl.trans(w), acc)
+        if FP8_WEIGHT:
+            row_scale = tl.load(up_scale_ptr + gj_flat, mask=mask_gj, other=0.0)
+            acc *= row_scale[None, :]
         gate = tl.sigmoid(tl.reshape(acc, (ROWS, HC, BLOCK_J)))
         xg = tl.load(
             x_ptr
@@ -165,11 +178,9 @@ def fused_hc_mix_supported(
     # device-scope atomics, so summation order varies across replays.
     if _deterministic_inference():
         return False
-    return (
+    common = (
         hyper_input_normed.is_cuda
         and hyper_input_normed.dtype in (torch.bfloat16, torch.float16)
-        and w_down.dtype == hyper_input_normed.dtype
-        and w_up.dtype == hyper_input_normed.dtype
         and hyper_input_normed.shape[0] <= _FUSED_MIX_MAX_ROWS
         and hyper_input_normed.dim() == 2
         and hyper_input_normed.shape[1] % 2048 == 0
@@ -177,6 +188,36 @@ def fused_hc_mix_supported(
         and w_down.is_contiguous()
         and w_up.is_contiguous()
     )
+    if not common:
+        return False
+    if (
+        w_down.dtype == hyper_input_normed.dtype
+        and w_up.dtype == hyper_input_normed.dtype
+    ):
+        return True
+    return _rowwise_fp8_pair(w_down, w_up) is not None
+
+
+def _rowwise_fp8_pair(w_down: torch.Tensor, w_up: torch.Tensor):
+    """Row scales of a rowwise-FP8 (SM120 online FP8) mix pair, or None for BF16."""
+    any_fp8 = w_down.dtype == torch.float8_e4m3fn or w_up.dtype == torch.float8_e4m3fn
+    if not any_fp8:
+        return None
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import rowwise_scale_of
+
+    down_scale = rowwise_scale_of(w_down)
+    up_scale = rowwise_scale_of(w_up)
+    if (
+        w_down.dtype != torch.float8_e4m3fn
+        or w_up.dtype != torch.float8_e4m3fn
+        or down_scale is None
+        or up_scale is None
+    ):
+        raise RuntimeError(
+            "SM120 online FP8 HyperConnection mix requires a complete "
+            "rowwise-FP8 weight/scale pair"
+        )
+    return down_scale, up_scale
 
 
 def fused_hc_mix(
@@ -195,6 +236,11 @@ def fused_hc_mix(
     out = torch.empty((rows, hs), dtype=hyper_input_normed.dtype, device=device)
     if rows == 0:
         return out
+    scales = _rowwise_fp8_pair(w_down, w_up)
+    if scales is None:
+        down_scale, up_scale = w_down, w_up  # Unused kernel arguments.
+    else:
+        down_scale, up_scale = scales
     _hc_mix_persistent_kernel[(num_ctas,)](
         hyper_input_normed,
         w_down,
@@ -202,6 +248,8 @@ def fused_hc_mix(
         t_raw,
         out,
         _get_counters(device),
+        down_scale,
+        up_scale,
         k,
         lowrank,
         hs,
@@ -214,6 +262,7 @@ def fused_hc_mix(
         BLOCK_K=256,
         BLOCK_J=32,
         BLOCK_R=64,
+        FP8_WEIGHT=scales is not None,
         num_warps=8,
     )
     return out
