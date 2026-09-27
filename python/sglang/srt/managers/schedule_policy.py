@@ -66,6 +66,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchPrefixParams,
     zero_match_result,
 )
+from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey, TreeNode
 
 if TYPE_CHECKING:
@@ -109,6 +110,8 @@ IN_BATCH_PREFIX_CACHING_DEPRIORITIZE_THRESHOLD = int(
 
 
 IGNORE_EOS_RESERVE_TOKENS = 1
+# New requests held back because the separate Mamba pool could not cover them.
+_mamba_admission_deferrals = 0
 # AMD/HIP-only: the prefill tile-budget admission control is part of the AMD
 # compact extend-attention work and is gated on HIP (see _check_prefill_tile_budget),
 # so non-AMD vendors keep the exact legacy scheduler behavior.
@@ -715,6 +718,39 @@ class PrefillAdder:
             if self.is_hybrid_ssm_cache:
                 self.rem_mamba_slots += self.tree_cache.mamba_evictable_size()
 
+        # The SEPARATE Mamba pool (`HybridReqToTokenPool`'s own allocator) has
+        # no gate above, so a request admitted while most slots are pinned
+        # asserts in `HybridReqToTokenPool.alloc` ("Not enough space for mamba
+        # ping pong idx"). Snapshot the recoverable slots now -- before the
+        # scheduler's `alloc_group_begin` pre-grab skews the free count -- and
+        # reserve each new request's worst case in `try_reserve_mamba`.
+        # `None` when the pool is unified (gated above) or there is no Mamba.
+        self.mamba_state_headroom: Optional[int] = None
+        self.mamba_state_reserved = 0
+        req_to_token_pool = getattr(tree_cache, "req_to_token_pool", None)
+        if not self._mamba_slot_cost and isinstance(
+            req_to_token_pool, HybridReqToTokenPool
+        ):
+            self._mamba_pool = req_to_token_pool
+            self._mamba_ping_pong_slots = 0
+            if req_to_token_pool.enable_mamba_extra_buffer:
+                self._mamba_ping_pong_slots = (
+                    1
+                    if req_to_token_pool.enable_mamba_extra_buffer_lazy
+                    else req_to_token_pool.mamba_ping_pong_track_buffer_size
+                )
+            # With int8 checkpoints the radix states live in their own pool and
+            # free nothing here (mirrors the pool-stats observer).
+            evictable = 0
+            if (
+                self.is_hybrid_ssm_cache
+                and getattr(req_to_token_pool, "mamba_ckpt_pool", None) is None
+            ):
+                evictable = self.tree_cache.mamba_evictable_size()
+            self.mamba_state_headroom = (
+                req_to_token_pool.mamba_allocator.available_size() + evictable
+            )
+
         self.priority_scheduling_preemption_threshold = (
             priority_scheduling_preemption_threshold
         )
@@ -824,6 +860,58 @@ class PrefillAdder:
         if self._mamba_slot_cost and not req.kv.holds_mamba:
             return self._mamba_slot_cost
         return 0
+
+    def _mamba_state_cost(self, req: Req) -> int:
+        """Worst-case separate-pool Mamba slots a request takes on admission.
+
+        Its own state slot (COW'd at match, bound by a host load-back, or taken
+        in `HybridReqToTokenPool.alloc`), its ping-pong track buffers, and one
+        more for the matched prefix state that admission locks out of the
+        evictable set (the device COW source, or the node a host load-back
+        restores). A continuing request that already holds both costs 0.
+        """
+        kv = req.kv
+        cost = 0 if kv.holds_mamba else 1
+        if self._mamba_ping_pong_slots and kv.mamba_ping_pong_track_buffer is None:
+            cost += self._mamba_ping_pong_slots
+        return cost + 1 if cost else 0
+
+    def try_reserve_mamba(self, req: Req) -> bool:
+        """Reserve a new request's Mamba slots before anything allocates them.
+
+        Called before `init_next_round_input`, whose COW is the first
+        allocation. False means defer: the request stays queued and is retried
+        next step. The usual cause is a write-through backup chain that pins
+        every un-backed chunk state of a long prefill until its D2H ack --
+        transient, so the caller must not latch `batch_is_full`.
+        Reservations are not refunded within the round (conservative).
+        """
+        if self.mamba_state_headroom is None:
+            return True
+        cost = self._mamba_state_cost(req)
+        if self.mamba_state_headroom - self.mamba_state_reserved >= cost:
+            self.mamba_state_reserved += cost
+            return True
+
+        global _mamba_admission_deferrals
+        _mamba_admission_deferrals += 1
+        if _mamba_admission_deferrals == 1 or _mamba_admission_deferrals % 100 == 0:
+            logger.warning(
+                "Mamba pool cannot cover a new request (rid=%s): needs %d slots, "
+                "%d recoverable at the start of this round, %d already reserved "
+                "(%d free now, %d evictable); deferring it to the next step "
+                "(%d deferrals so far).",
+                getattr(req, "rid", None),
+                cost,
+                self.mamba_state_headroom,
+                self.mamba_state_reserved,
+                self._mamba_pool.mamba_allocator.available_size(),
+                self.tree_cache.mamba_evictable_size()
+                if self.is_hybrid_ssm_cache
+                else 0,
+                _mamba_admission_deferrals,
+            )
+        return False
 
     def ceil_paged_tokens(self, tokens: int) -> int:
         return -(-tokens // self.page_size) * self.page_size

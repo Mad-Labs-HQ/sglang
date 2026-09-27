@@ -3986,6 +3986,12 @@ class Scheduler(
                     # marks the staged span below once it is surfaced.
                     req.host_hit_is_storage = False
 
+            # Before the match's COW, the first Mamba allocation. A plain break
+            # (not NO_TOKEN): the shortfall is transient, so retry next step
+            # rather than latch batch_is_full until a running request leaves.
+            if not adder.try_reserve_mamba(req):
+                break
+
             req.init_next_round_input(self.tree_cache)
             if self.enable_hicache_storage and (
                 self._prefetch_after_device_hit_loss(req)
