@@ -229,6 +229,7 @@ from sglang.srt.managers.schedule_policy import (
     AddReqResult,
     PrefillAdder,
     SchedulePolicy,
+    warn_mamba_admission_deferred,
 )
 from sglang.srt.managers.scheduler_components.batch_result_processor import (
     SchedulerBatchResultProcessor,
@@ -3866,11 +3867,8 @@ class Scheduler(
         if available_slots >= needed_slots:
             return True
 
-        logger.debug(
-            "Mamba admission deferred for rid=%s: needed_slots=%d available_slots=%d",
-            req.rid,
-            needed_slots,
-            available_slots,
+        warn_mamba_admission_deferred(
+            req.rid, needed_slots, available_slots, "before prefix match"
         )
         return False
 

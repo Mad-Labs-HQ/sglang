@@ -62,6 +62,7 @@ from sglang.srt.mem_cache.allocator.unified_mamba import (
 )
 from sglang.srt.mem_cache.base_prefix_cache import (
     BasePrefixCache,
+    EvictParams,
     InitLoadBackParams,
     InsertParams,
     MatchPrefixParams,
@@ -111,6 +112,33 @@ IN_BATCH_PREFIX_CACHING_DEPRIORITIZE_THRESHOLD = int(
 
 
 IGNORE_EOS_RESERVE_TOKENS = 1
+# New requests held back because the Mamba pool could not cover them.
+_mamba_admission_deferrals = 0
+
+
+def warn_mamba_admission_deferred(rid, needed: int, available: int, why: str) -> None:
+    """Rate-limited record of a Mamba admission deferral (first, then every 100th).
+
+    A deferral is the pool doing its job under a transient shortage -- usually a
+    write-through backup chain pinning a long prefill's un-backed chunk states
+    until the D2H ack -- so it is not an error, but it must be visible: it is
+    the only trace left of what used to be a scheduler crash.
+    """
+    global _mamba_admission_deferrals
+    _mamba_admission_deferrals += 1
+    if _mamba_admission_deferrals == 1 or _mamba_admission_deferrals % 100 == 0:
+        logger.warning(
+            "Mamba pool cannot cover a new request (rid=%s, %s): needs %d slots, "
+            "%d free after eviction; deferring it to the next step "
+            "(%d deferrals so far).",
+            rid,
+            why,
+            needed,
+            available,
+            _mamba_admission_deferrals,
+        )
+
+
 # AMD/HIP-only: the prefill tile-budget admission control is part of the AMD
 # compact extend-attention work and is gated on HIP (see _check_prefill_tile_budget),
 # so non-AMD vendors keep the exact legacy scheduler behavior.
@@ -848,6 +876,48 @@ class PrefillAdder:
             return self._mamba_slot_cost * req_pool.mamba_admission_slots(req.kv)
         return 0
 
+    def _mamba_covers_host_restore(self, req: Req) -> bool:
+        """Whether the Mamba pool can take a host hit's load-back as well.
+
+        `Scheduler._ensure_mamba_admission_capacity` gates each candidate on
+        `mamba_admission_slots` before matching: its own state plus its initial
+        ping-pong buffers. A host hit takes one more. `prepare_load_back` binds
+        the request's state slot, and the controller then restores the cached
+        node's state into ANOTHER device slot (`mamba_host_hit_length` of them)
+        that stays locked until the load completes. Unreserved, a load-back
+        into an exactly-fitting pool leaves too little for the ping-pong
+        buffers, and `alloc_req_slots` fails loud -- the same outage the
+        pre-match gate exists to prevent. Checked once the match is known and
+        before anything is loaded; evicts like the pre-match gate.
+        """
+        req_to_token_pool = getattr(self.tree_cache, "req_to_token_pool", None)
+        if not isinstance(req_to_token_pool, HybridReqToTokenPool):
+            return True
+        restore_slots = req.mamba_host_hit_length
+        if restore_slots <= 0:
+            return True
+
+        needed = restore_slots + req_to_token_pool.mamba_admission_slots(req.kv)
+        needed += sum(
+            req_to_token_pool.mamba_admission_slots(r.kv) for r in self.can_run_list
+        )
+        allocator = req_to_token_pool.mamba_allocator
+        available = allocator.schedulable_available_size()
+        # Same eviction rule as the pre-match gate: int8 checkpoints free no
+        # active slot unless the unified pool can donate Full bytes.
+        can_evict = req_to_token_pool.mamba_ckpt_pool is None or hasattr(
+            self.token_to_kv_pool_allocator, "mamba_slot_full_token_cost"
+        )
+        if available < needed and can_evict and self.tree_cache.supports_mamba():
+            self.tree_cache.evict_for_alloc(
+                EvictParams(num_tokens=0, mamba_num=needed - available)
+            )
+            available = allocator.schedulable_available_size()
+        if available >= needed:
+            return True
+        warn_mamba_admission_deferred(req.rid, needed, available, "host load-back")
+        return False
+
     def ceil_paged_tokens(self, tokens: int) -> int:
         return -(-tokens // self.page_size) * self.page_size
 
@@ -1388,6 +1458,11 @@ class PrefillAdder:
             )
             if isinstance(admission, AddReqResult):
                 return admission
+
+            # OTHER, not NO_TOKEN: the shortage is transient (pinned backups),
+            # so retry next step instead of latching batch_is_full.
+            if not self._mamba_covers_host_restore(req):
+                return AddReqResult.OTHER
 
             # A rejected candidate must not report prefillable or queue H2D.
             if (self.prefill_delayer_single_pass is not None) and (
