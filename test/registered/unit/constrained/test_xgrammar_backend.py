@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import Mock, call
 
 import pytest
@@ -99,3 +100,7 @@ def test_rejected_token_does_not_enter_debug_history():
         grammar.accept_token(13)
 
     assert grammar.accepted_tokens == [12]
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))
