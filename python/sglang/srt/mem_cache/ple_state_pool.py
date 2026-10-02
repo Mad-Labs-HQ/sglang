@@ -7,6 +7,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import Any, List, Optional, Protocol, Tuple
 
+import msgspec
 import torch
 
 from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
@@ -17,6 +18,13 @@ from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 # Reserve the largest value for PLE's request-wide N-gram state, which is not
 # owned by any model layer.
 PLE_NGRAM_STATE_LAYER_ID = (1 << 32) - 1
+
+
+class SlotStateHiCacheSpec(msgspec.Struct, frozen=True, kw_only=True):
+    # `name` is part of the persisted L3 storage key; never rename an existing one.
+    name: str
+    tensor: torch.Tensor
+    slot_axis: int
 
 
 class SlotIndexedState(Protocol):
@@ -33,6 +41,8 @@ class SlotIndexedState(Protocol):
     def load_cpu_slots(self, data: Any, indices: torch.Tensor) -> None: ...
 
     def iter_transfer_state_entries(self): ...
+
+    def hicache_transfer_spec(self) -> SlotStateHiCacheSpec: ...
 
 
 class ShortConvPool:
@@ -138,6 +148,12 @@ class ShortConvPool:
                 layer_id,
             )
 
+    def hicache_transfer_spec(self) -> SlotStateHiCacheSpec:
+        assert self.conv_state is not None
+        return SlotStateHiCacheSpec(
+            name="ple_short_conv", tensor=self.conv_state, slot_axis=1
+        )
+
 
 class NGramPool:
     def __init__(
@@ -240,3 +256,7 @@ class NGramPool:
         """Yield replicated request-wide N-gram history for PD transfer."""
         if self.context is not None:
             yield "ple_ngram", self.context, None, PLE_NGRAM_STATE_LAYER_ID
+
+    def hicache_transfer_spec(self) -> SlotStateHiCacheSpec:
+        assert self.context is not None
+        return SlotStateHiCacheSpec(name="ple_ngram", tensor=self.context, slot_axis=0)

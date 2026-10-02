@@ -8,6 +8,7 @@ from typing import Any, Callable, NamedTuple, Optional
 import torch
 
 from sglang.srt.mem_cache.pool_host.base import shared_host_layout_domains
+from sglang.srt.mem_cache.pool_host.mamba import MambaPoolHost
 from sglang.srt.utils import get_device_module
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,14 @@ class L2TransferEngine:
             transfers, self.host_to_device_stream, "host_to_device", start_event
         ) as (transfers, completion):
             primary = transfers[0] if transfers else None
+            # Queued before layer 0's done event: PLE state is read before any layer wait.
+            for transfer in transfers:
+                if not transfer.is_draft and isinstance(
+                    transfer.host_pool, MambaPoolHost
+                ):
+                    transfer.host_pool.load_slot_siblings_to_device(
+                        transfer.host_indices, transfer.device_indices, self.io_backend
+                    )
             for layer_id in range(transfer_layer_id_max):
                 for transfer in transfers:
                     local_layer_id = (

@@ -22,6 +22,7 @@ from sglang.srt.mem_cache.hicache_storage import (
     PoolTransferResult,
 )
 from sglang.srt.mem_cache.pool_host import HostKVCache, HostTensorAllocator
+from sglang.srt.mem_cache.pool_host.mamba import MambaPoolHost
 from sglang.srt.mem_cache.pool_host.mla import MLATokenToKVPoolHost
 from sglang.srt.observability.metrics_collector import StorageMetrics
 
@@ -774,6 +775,11 @@ class MooncakeStore(HiCacheStorage, MooncakeBaseStore):
         suffixes = []
         if pool_name == PoolName.KV:
             suffixes = [f"_{self.mla_suffix}_k"]
+        elif pool_name == PoolName.MAMBA and isinstance(host_pool, MambaPoolHost):
+            suffixes = [
+                f"_{self.mha_suffix}_{name}"
+                for name in host_pool.get_storage_component_names()
+            ]
         elif pool_name == PoolName.MAMBA:
             # Mamba stores one temporal object plus one object per conv state.
             # conv-only models have no ssm state; drop the 0-element temporal

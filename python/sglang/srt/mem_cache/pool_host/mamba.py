@@ -5,6 +5,7 @@ import os
 import threading
 from typing import Optional
 
+import msgspec
 import numpy as np
 import torch
 
@@ -71,7 +72,81 @@ def _npu_hicache_mamba_io_mode() -> str:
     return mode
 
 
+# O_DIRECT storage zero-copy needs every host slot stride to be a multiple of the
+# OS page; see MambaPoolHost.is_stride_page_aligned.
+_SLOT_SIBLING_HOST_ALIGN_BYTES = 4096
+# The mamba JIT transfer kernels move uint4 words.
+_MAMBA_KERNEL_ITEM_ALIGN_BYTES = 16
+
+
+class _SlotSiblingLayout(msgspec.Struct, frozen=True, kw_only=True):
+    """A slot-indexed side state (e.g. Qwen4 PLE) mirrored into one host row per slot.
+
+    The device state is viewed as layer-first [layers, slots, ...]. A host row
+    holds the layers back to back, zero-padded up to `host_stride` bytes.
+    """
+
+    name: str
+    device_layers: torch.Tensor
+    device_layer_ptrs: torch.Tensor
+    item_bytes: int
+    host_stride: int
+
+    @property
+    def num_layers(self) -> int:
+        return int(self.device_layers.shape[0])
+
+    @property
+    def payload_bytes(self) -> int:
+        return self.num_layers * self.item_bytes
+
+
+def _collect_slot_sibling_layouts(
+    device_pool: MambaPool,
+) -> tuple[_SlotSiblingLayout, ...]:
+    layouts: list[_SlotSiblingLayout] = []
+    for sibling in device_pool.slot_siblings:
+        spec = sibling.hicache_transfer_spec()
+        if spec.slot_axis == 0:
+            device_layers = spec.tensor.unsqueeze(0)
+        elif spec.slot_axis == 1:
+            device_layers = spec.tensor
+        else:
+            raise ValueError(
+                f"HiCache slot sibling {spec.name!r} has slot axis {spec.slot_axis}; "
+                "expected 0 or 1"
+            )
+        if device_layers.ndim < 2 or not device_layers.is_contiguous():
+            raise ValueError(
+                f"HiCache slot sibling {spec.name!r} must view as a contiguous "
+                f"[layers, slots, ...] tensor, got shape={tuple(device_layers.shape)}"
+            )
+        if any(layout.name == spec.name for layout in layouts):
+            raise ValueError(f"Duplicate HiCache slot sibling name: {spec.name!r}")
+        item_bytes = device_layers[0, 0].numel() * device_layers.element_size()
+        payload_bytes = device_layers.shape[0] * item_bytes
+        align = _SLOT_SIBLING_HOST_ALIGN_BYTES
+        layouts.append(
+            _SlotSiblingLayout(
+                name=spec.name,
+                device_layers=device_layers,
+                device_layer_ptrs=torch.tensor(
+                    [layer.data_ptr() for layer in device_layers],
+                    dtype=torch.uint64,
+                    device=device_layers.device,
+                ),
+                item_bytes=item_bytes,
+                host_stride=-(-payload_bytes // align) * align,
+            )
+        )
+    return tuple(layouts)
+
+
 class MambaPoolHost(HostKVCache):
+    # Class-level defaults: no side states unless __init__ finds registered ones.
+    slot_sibling_layouts: tuple[_SlotSiblingLayout, ...] = ()
+    slot_sibling_buffers: tuple[torch.Tensor, ...] = ()
+
     def __init__(
         self,
         device_pool: MambaPool,
@@ -107,6 +182,7 @@ class MambaPoolHost(HostKVCache):
         self.conv_dtype = device_pool.mamba_cache.conv[0].dtype
         self.temporal_dtype = device_pool.mamba_cache.temporal.dtype
         self.dtype = self.conv_dtype
+        self.slot_sibling_layouts = _collect_slot_sibling_layouts(device_pool)
         self.size_per_token = self.get_size_per_token()
 
         device_capacity = getattr(device_pool, "host_capacity_tokens", None)
@@ -264,11 +340,27 @@ class MambaPoolHost(HostKVCache):
                         allocator=self.allocator,
                     )
                 )
+        self.slot_sibling_buffers = tuple(
+            alloc_func(
+                (self.size, layout.host_stride),
+                dtype=torch.uint8,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                allocator=self.allocator,
+            )
+            for layout in self.slot_sibling_layouts
+        )
         # destroy() unregisters via kv_buffer; without this list the pinned
         # registrations leak past the buffers' mmap. 0-element buffers
         # (conv-only models' temporal state) were never registered.
         return [
-            buf for buf in (self.temporal_buffer, *self.conv_buffer) if buf.numel() > 0
+            buf
+            for buf in (
+                self.temporal_buffer,
+                *self.conv_buffer,
+                *self.slot_sibling_buffers,
+            )
+            if buf.numel() > 0
         ]
 
     def _init_write_back_staging_buffers(self):
@@ -283,8 +375,18 @@ class MambaPoolHost(HostKVCache):
         self._conv_can_use_jit = [False] * len(self.conv_buffer)
 
     def get_hybrid_pool_buffer(self):
-        # Expose all mamba host tensors that need Mooncake buffer registration.
-        return [self.temporal_buffer, *self.conv_buffer]
+        # Expose all mamba host tensors that need storage-backend registration.
+        return [self.temporal_buffer, *self.conv_buffer, *self.slot_sibling_buffers]
+
+    def get_storage_component_names(self) -> list[str]:
+        """Per-page storage components, in get_page_buffer_meta() pointer order.
+
+        Storage backends derive their per-component object keys from these names.
+        """
+        names = ["temporal"] if self.temporal_state_elem_size > 0 else []
+        names.extend(f"conv_{i}" for i in range(len(self.conv_state_shapes)))
+        names.extend(layout.name for layout in self.slot_sibling_layouts)
+        return names
 
     def _iter_page_tensors(self, index: int):
         if self.layout in ["page_first", "page_first_direct"]:
@@ -295,6 +397,8 @@ class MambaPoolHost(HostKVCache):
             yield self.temporal_buffer[:, index : index + self.page_size]
             for conv_buf in self.conv_buffer:
                 yield conv_buf[:, index : index + self.page_size]
+        for sibling_buf in self.slot_sibling_buffers:
+            yield sibling_buf[index]
 
     @staticmethod
     def _flatten_tensor_bytes(tensor: torch.Tensor) -> torch.Tensor:
@@ -343,7 +447,8 @@ class MambaPoolHost(HostKVCache):
             for conv_elem_size in self.conv_state_elem_sizes
         )
         temporal_size = self.temporal_state_elem_size * self.temporal_dtype.itemsize
-        return (conv_total_size + temporal_size) * self.num_mamba_layers
+        sibling_size = sum(layout.host_stride for layout in self.slot_sibling_layouts)
+        return (conv_total_size + temporal_size) * self.num_mamba_layers + sibling_size
 
     def get_ksize_per_token(self):
         return self.get_size_per_token()
@@ -705,6 +810,7 @@ class MambaPoolHost(HostKVCache):
                     can_use_jit=self._conv_can_use_jit[conv_idx],
                     src_ptrs=self.conv_device_ptrs[conv_idx],
                 )
+            self._backup_slot_siblings(host_indices, device_indices, io_backend)
         else:
             for layer_id in range(self.num_mamba_layers):
                 self._copy_tensor(
@@ -722,6 +828,96 @@ class MambaPoolHost(HostKVCache):
                         host_indices,
                         io_backend,
                     )
+
+    @staticmethod
+    def _slot_sibling_uses_kernel(io_backend: str, layout: _SlotSiblingLayout) -> bool:
+        return (
+            io_backend == "kernel"
+            and (_is_cuda or _is_hip)
+            and layout.device_layers.is_cuda
+            and layout.item_bytes % _MAMBA_KERNEL_ITEM_ALIGN_BYTES == 0
+        )
+
+    def _backup_slot_siblings(
+        self, host_indices: torch.Tensor, device_indices: torch.Tensor, io_backend
+    ) -> None:
+        if device_indices.numel() == 0:
+            return
+        for layout, host_buffer in zip(
+            self.slot_sibling_layouts, self.slot_sibling_buffers
+        ):
+            if self._slot_sibling_uses_kernel(io_backend, layout):
+                transfer_kv_mamba_lf_pf(
+                    src_ptrs=layout.device_layer_ptrs,
+                    dst=host_buffer,
+                    src_indices=device_indices,
+                    dst_indices=host_indices.to(
+                        device_indices.device, non_blocking=True
+                    ),
+                    item_size=layout.item_bytes,
+                    dst_layout_dim=layout.host_stride,
+                    num_layers=layout.num_layers,
+                )
+                continue
+            rows = (
+                layout.device_layers.index_select(
+                    1,
+                    device_indices.to(layout.device_layers.device, dtype=torch.int64),
+                )
+                .movedim(1, 0)
+                .contiguous()
+            )
+            host_rows = host_indices.to(host_buffer.device, dtype=torch.int64)
+            host_buffer[host_rows, : layout.payload_bytes] = (
+                rows.view(torch.uint8).reshape(rows.shape[0], -1).to(host_buffer.device)
+            )
+
+    def load_slot_siblings_to_device(
+        self,
+        host_indices: torch.Tensor,
+        device_indices: torch.Tensor,
+        io_backend,
+    ) -> None:
+        """Restore slot-indexed side states (Qwen4 PLE) for loaded slots.
+
+        Callers queue this ahead of the per-layer loads: these states are read
+        before the layer-local transfer waits that order the GDN state.
+        """
+        if device_indices.numel() == 0:
+            return
+        for layout, host_buffer in zip(
+            self.slot_sibling_layouts, self.slot_sibling_buffers
+        ):
+            if self._slot_sibling_uses_kernel(io_backend, layout):
+                src_indices = host_indices.to(device_indices.device, non_blocking=True)
+                for layer_id in range(layout.num_layers):
+                    transfer_kv_mamba_pf_lf(
+                        src=host_buffer,
+                        dst=layout.device_layers[layer_id],
+                        src_indices=src_indices,
+                        dst_indices=device_indices,
+                        layer_id=layer_id,
+                        item_size=layout.item_bytes,
+                        src_layout_dim=layout.host_stride,
+                    )
+                continue
+            host_rows = host_indices.to(host_buffer.device, dtype=torch.int64)
+            payload = host_buffer[host_rows, : layout.payload_bytes].contiguous()
+            values = (
+                payload.to(layout.device_layers.device)
+                .view(layout.device_layers.dtype)
+                .reshape(
+                    payload.shape[0],
+                    layout.num_layers,
+                    *layout.device_layers.shape[2:],
+                )
+                .movedim(0, 1)
+            )
+            layout.device_layers.index_copy_(
+                1,
+                device_indices.to(layout.device_layers.device, dtype=torch.int64),
+                values,
+            )
 
     def get_data_page(self, index, flat: bool = True) -> torch.Tensor:
         data_page = torch.cat(
@@ -814,6 +1010,13 @@ class MambaPoolHost(HostKVCache):
                 )
                 ptr_list.append(conv_ptr)
                 element_size_list.append(conv_element_sizes[j])
+            for layout, sibling_buf in zip(
+                self.slot_sibling_layouts, self.slot_sibling_buffers
+            ):
+                ptr_list.append(
+                    sibling_buf.data_ptr() + indices[i] * layout.host_stride
+                )
+                element_size_list.append(self.page_size * layout.host_stride)
         return ptr_list, element_size_list
 
     def is_stride_page_aligned(self, page_size_bytes: int = 4096) -> bool:
@@ -833,5 +1036,12 @@ class MambaPoolHost(HostKVCache):
             if buf.data_ptr() % page_size_bytes != 0:
                 return False
             if conv_stride % page_size_bytes != 0:
+                return False
+        for layout, sibling_buf in zip(
+            self.slot_sibling_layouts, self.slot_sibling_buffers
+        ):
+            if sibling_buf.data_ptr() % page_size_bytes != 0:
+                return False
+            if layout.host_stride % page_size_bytes != 0:
                 return False
         return True

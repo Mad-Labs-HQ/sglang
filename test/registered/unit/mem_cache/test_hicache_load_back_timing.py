@@ -129,5 +129,37 @@ class TestLoadBackDurationMetric(CustomTestCase):
         self.assertEqual(stub.cache_controller.ack_load_queue, [])
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestSlotSiblingLoadOrdering(CustomTestCase):
+    def test_slot_siblings_restore_before_layer_zero_release(self):
+        """PLE side state must be queued before any layer is released to readers."""
+        from sglang.srt.mem_cache.l2_transfer import L2Transfer, L2TransferEngine
+        from sglang.srt.mem_cache.pool_host.mamba import MambaPoolHost
+
+        events = []
+        host = MambaPoolHost.__new__(MambaPoolHost)
+        host.layer_num = 2
+        host.load_slot_siblings_to_device = lambda *args: events.append("siblings")
+        host.load_to_device_per_layer_physical = (
+            lambda pool, h, d, layer_id, io, *, is_draft=False: events.append(
+                ("layer", layer_id, is_draft)
+            )
+        )
+        indices = torch.tensor([1, 2], device="cuda")
+        engine = L2TransferEngine("kernel")
+        engine.submit_host_to_device(
+            [
+                L2Transfer(host, object(), indices, indices),
+                L2Transfer(host, object(), indices, indices, is_draft=True),
+            ],
+            transfer_layer_id_max=2,
+            on_layer_done=lambda layer_id: events.append(("done", layer_id)),
+        ).finish_event.synchronize()
+
+        self.assertEqual(events[0], "siblings")
+        self.assertEqual(events.count("siblings"), 1)
+        self.assertLess(events.index("siblings"), events.index(("done", 0)))
+
+
 if __name__ == "__main__":
     unittest.main()

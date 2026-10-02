@@ -52,6 +52,16 @@ def _fake_pool_host_mla_module():
     return pool_host_mla
 
 
+def _fake_pool_host_mamba_module():
+    pool_host_mamba = types.ModuleType("sglang.srt.mem_cache.pool_host.mamba")
+
+    class MambaPoolHost:
+        pass
+
+    pool_host_mamba.MambaPoolHost = MambaPoolHost
+    return pool_host_mamba
+
+
 def _fake_pool_host_module():
     pool_host = types.ModuleType("sglang.srt.mem_cache.pool_host")
 
@@ -70,6 +80,7 @@ def _fake_host_pool_modules():
     return {
         "sglang.srt.mem_cache.pool_host": _fake_pool_host_module(),
         "sglang.srt.mem_cache.pool_host.mla": _fake_pool_host_mla_module(),
+        "sglang.srt.mem_cache.pool_host.mamba": _fake_pool_host_mamba_module(),
     }
 
 

@@ -424,6 +424,23 @@ class TestMamba(unittest.TestCase):
         self.assertEqual(len(payload), 2)
         pool.mamba_pool.load_cpu_copy(payload, src)
 
+    def test_ngram_read_waits_for_hicache_layer_zero(self):
+        """PLE reads the N-gram window before any layer wait, so the read itself
+        must wait for a HiCache load-back to release layer 0."""
+        pool = self._setup_pool_with_ngram()
+        order = []
+        counter = SimpleNamespace(wait_until=lambda layer: order.append(layer))
+        pool.register_layer_transfer_counter(counter)
+        original_get = pool.ngram_pool.get_context
+
+        def recording_get(indices):
+            order.append("read")
+            return original_get(indices)
+
+        pool.ngram_pool.get_context = recording_get
+        pool.get_ngram_context(pool.mamba_allocator.alloc(1))
+        self.assertEqual(order, [0, "read"])
+
     def test_mamba_track_aligned_lens_math(self):
         """Floor division must swallow the scheduler's `aligned + 1` (_force_track_h),
         or the PLE side states snapshot one token past the mamba state."""

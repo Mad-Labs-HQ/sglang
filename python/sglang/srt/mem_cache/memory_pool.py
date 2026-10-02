@@ -412,6 +412,10 @@ class MambaPool:
         so a slot never changes owner with a stale sibling row attached."""
         self._slot_siblings = [*self._slot_siblings, state]
 
+    @property
+    def slot_siblings(self) -> Tuple:
+        return tuple(self._slot_siblings)
+
     @dataclass(frozen=True, kw_only=True)
     class State:
         conv: List[torch.Tensor]
@@ -1218,7 +1222,11 @@ class MambaPool:
         return subdims_per_tensor
 
     def get_kv_size_bytes(self):
-        return self.mamba_cache.mem_usage_bytes()
+        sibling_bytes = sum(
+            sibling.hicache_transfer_spec().tensor.nbytes
+            for sibling in self._slot_siblings
+        )
+        return self.mamba_cache.mem_usage_bytes() + sibling_bytes
 
 
 class HybridReqToTokenPool(ReqToTokenPool):
@@ -1598,6 +1606,10 @@ class HybridReqToTokenPool(ReqToTokenPool):
         return self.short_conv_pool.layer_intermediate_cache(layer_id)
 
     def get_ngram_context(self, ngram_indices: torch.Tensor) -> torch.Tensor:
+        # PLE reads N-gram history before layer 0, ahead of every per-layer wait;
+        # a HiCache load-back restores it before releasing layer 0.
+        if self.layer_transfer_counter is not None:
+            self.layer_transfer_counter.wait_until(0)
         return self.ngram_pool.get_context(ngram_indices)
 
     def set_ngram_context(

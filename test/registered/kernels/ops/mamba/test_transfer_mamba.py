@@ -347,3 +347,118 @@ def test_mamba_kernel_full_indices(dtype, layout):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v", "-s"]))
+
+
+PLE_CHANNELS = 64
+PLE_STATE_LEN = 9
+NGRAM_CONTEXT_LEN = 2
+NGRAM_EOS = 7
+
+
+def make_host_pool_with_ple_siblings(dtype, layout):
+    """Mock host pool whose device pool carries real Qwen4 PLE side-state pools."""
+    from sglang.srt.mem_cache.ple_state_pool import NGramPool, ShortConvPool
+    from sglang.srt.mem_cache.pool_host.mamba import _collect_slot_sibling_layouts
+
+    host = make_host_pool(dtype, layout)
+    short_conv = ShortConvPool(
+        size=SIZE - 1,
+        state_shape=(PLE_CHANNELS, PLE_STATE_LEN),
+        layer_ids=[1],
+        dtype=dtype,
+        device=DEVICE,
+    )
+    ngram = NGramPool(
+        size=SIZE - 1,
+        context_len=NGRAM_CONTEXT_LEN,
+        eos_token_id=NGRAM_EOS,
+        device=DEVICE,
+    )
+    host.device_pool.slot_siblings = (short_conv, ngram)
+    host.slot_sibling_layouts = _collect_slot_sibling_layouts(host.device_pool)
+    host.slot_sibling_buffers = tuple(
+        torch.zeros((SIZE, layout.host_stride), dtype=torch.uint8).pin_memory()
+        for layout in host.slot_sibling_layouts
+    )
+    host.size_per_token = host.get_size_per_token()
+    return host, short_conv, ngram
+
+
+def fill_ple_siblings(short_conv, ngram):
+    short_conv.conv_state.copy_(
+        torch.arange(short_conv.conv_state.numel(), device=DEVICE)
+        .remainder(251)
+        .to(short_conv.conv_state.dtype)
+        .view_as(short_conv.conv_state)
+    )
+    ngram.context.copy_(
+        torch.arange(ngram.context.numel(), device=DEVICE).view_as(ngram.context) + 100
+    )
+
+
+@pytest.mark.parametrize("io_backend", ["kernel", "direct"])
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_ple_slot_siblings_roundtrip_with_padded_host_stride(io_backend, dtype):
+    """PLE side states must survive a host round-trip into a different device slot."""
+    host, short_conv, ngram = make_host_pool_with_ple_siblings(dtype, "page_first")
+    fill_ple_siblings(short_conv, ngram)
+    expected_conv = short_conv.conv_state.clone()
+    expected_ngram = ngram.context.clone()
+
+    device_indices = torch.tensor([1, 5, 10], dtype=torch.int64, device=DEVICE)
+    host_indices = torch.tensor([0, 1, 2], dtype=torch.int64)
+    load_indices = torch.tensor([3, 7, 12], dtype=torch.int64, device=DEVICE)
+
+    host._backup_slot_siblings(host_indices, device_indices, io_backend)
+    torch.cuda.synchronize()
+    for layout, buf in zip(host.slot_sibling_layouts, host.slot_sibling_buffers):
+        assert layout.host_stride % 4096 == 0
+        assert torch.all(buf[host_indices, layout.payload_bytes :] == 0)
+
+    short_conv.reset_slots(torch.arange(SIZE, device=DEVICE))
+    ngram.reset_slots(torch.arange(SIZE, device=DEVICE))
+    host.load_slot_siblings_to_device(host_indices, load_indices, io_backend)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(
+        short_conv.conv_state[:, load_indices], expected_conv[:, device_indices]
+    )
+    torch.testing.assert_close(
+        ngram.context[load_indices], expected_ngram[device_indices]
+    )
+    untouched = torch.tensor(
+        sorted(set(range(SIZE)) - set(load_indices.tolist())), device=DEVICE
+    )
+    assert torch.all(short_conv.conv_state[:, untouched] == 0)
+    assert torch.all(ngram.context[untouched] == NGRAM_EOS)
+
+
+def test_ple_slot_siblings_extend_storage_layout():
+    """Storage component names, page pointers and sizes stay in one order."""
+    host, _, _ = make_host_pool_with_ple_siblings(torch.bfloat16, "page_first")
+    assert host.get_storage_component_names() == [
+        "temporal",
+        "conv_0",
+        "ple_short_conv",
+        "ple_ngram",
+    ]
+    host_indices = torch.tensor([2, 9], dtype=torch.int64)
+    ptrs, sizes = host.get_page_buffer_meta(host_indices)
+    names = host.get_storage_component_names()
+    assert len(ptrs) == len(sizes) == len(names) * len(host_indices)
+    for page, index in enumerate(host_indices.tolist()):
+        for j, (layout, buf) in enumerate(
+            zip(host.slot_sibling_layouts, host.slot_sibling_buffers)
+        ):
+            slot = page * len(names) + 2 + j
+            assert ptrs[slot] == buf.data_ptr() + index * layout.host_stride
+            assert sizes[slot] == layout.host_stride
+    sibling_bytes = sum(layout.host_stride for layout in host.slot_sibling_layouts)
+    assert host.get_size_per_token() == (
+        NUM_LAYERS
+        * (
+            host.temporal_state_elem_size * host.temporal_dtype.itemsize
+            + host.conv_state_elem_sizes[0] * host.conv_dtype.itemsize
+        )
+        + sibling_bytes
+    )
