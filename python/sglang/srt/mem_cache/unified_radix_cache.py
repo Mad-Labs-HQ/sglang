@@ -33,6 +33,7 @@ from sglang.srt.mem_cache.buffer_mode.pipeline import (
 from sglang.srt.mem_cache.buffer_mode.storage_existence_cache import (
     StorageExistenceCache,
 )
+from sglang.srt.mem_cache import madlabs_trace
 from sglang.srt.mem_cache.common import RetractionBackup
 from sglang.srt.mem_cache.hicache_storage import (
     PoolName,
@@ -500,6 +501,8 @@ class UnifiedRadixCache(BasePrefixCache):
         if self.disable:
             return self.tree_core.empty_match_result
         result = self.tree_core.match_prefix(params)
+        if madlabs_trace.ENABLED and params.req is not None:
+            self._trace_match(params, result)
         # Apply the walk's actions (e.g. a pending write-through relocation on
         # a split) before the finalizers, which can evict or raise.
         self._apply_cache_actions(result.cache_actions)
@@ -508,6 +511,22 @@ class UnifiedRadixCache(BasePrefixCache):
         # Finalizers must not emit actions; the walk's were applied above.
         assert not result.cache_actions
         return result
+
+    def _trace_match(self, params: MatchPrefixParams, result: MatchResult) -> None:
+        """One line per match: what was reused, and what was there to reuse."""
+        kv_node = getattr(self.tree_core, "_trace_last_kv_node", None)
+        best = self.tree_core.node_by_id(result.best_match_node)
+        mamba = None
+        if kv_node is not None and ComponentType.MAMBA in self.tree_core.components_by_type:
+            cd = kv_node.component_data[ComponentType.MAMBA]
+            mamba = "dev" if cd.value is not None else (
+                "host" if cd.host_value is not None else "none")
+        madlabs_trace.emit(
+            "match", rid=params.req.rid, len=len(params.key),
+            dev=len(result.device_indices), best_depth=madlabs_trace.depth(best),
+            kv_any=result.full_kv_hit_length,
+            kv_node=kv_node.id if kv_node is not None else None,
+            kv_node_mamba=mamba)
 
     def is_chunk_cache(self) -> bool:
         return self.disable
@@ -1081,7 +1100,8 @@ class UnifiedRadixCache(BasePrefixCache):
             # The tree never holds host values in buffer mode, and staging
             # is operation-owned (freed at each ack): nothing is evictable.
             return 0
-        result = self.tree_core.drive_host_eviction(component_type, num_tokens)
+        with madlabs_trace.cause(f"cpu_pressure:{component_type.name}"):
+            result = self.tree_core.drive_host_eviction(component_type, num_tokens)
         self._free_values(result.device_frees, result.host_frees)
         return result.tracker.get(component_type, 0)
 
@@ -1320,6 +1340,10 @@ class UnifiedRadixCache(BasePrefixCache):
             if host_indices is None:
                 return 0
             self.tree_core.commit_backup(node_id, host_indices, comp_xfers)
+            if madlabs_trace.ENABLED and ComponentType.MAMBA in comp_xfers:
+                node = self.tree_core.node_by_id(node_id)
+                madlabs_trace.emit("host_write", node=node_id,
+                                   depth=madlabs_trace.depth(node))
             lock_params = None
             if not write_back:
                 lock_params = self.inc_lock_ref(node_id).to_dec_params()

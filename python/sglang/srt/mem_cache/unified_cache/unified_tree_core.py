@@ -742,6 +742,7 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
             if len(key):
                 child_key = key.child_key(self.page_size)
 
+        self._trace_last_kv_node = node if node is not self.root_node else None
         return (
             value,
             best_match_node,
