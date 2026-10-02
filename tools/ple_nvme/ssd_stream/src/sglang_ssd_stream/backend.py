@@ -9,17 +9,18 @@ from contextlib import nullcontext
 import torch
 import triton
 import triton.language as tl
+from torch import nn
+
 from sglang.srt.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
 )
-from sglang.srt.layers.layer_boundary import get_attn_tp_context
 from sglang.srt.layers.dp_attention import attn_tp_all_reduce, is_allocation_symmetric
+from sglang.srt.layers.layer_boundary import get_attn_tp_context
 from sglang.srt.layers.quantization.unquant import UnquantizedEmbeddingMethod
 from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from sglang.srt.model_executor.runner import get_is_capture_mode
 from sglang.srt.utils import logger
-from torch import nn
 
 from ._io import PageReader
 from .config import SSDStreamConfig

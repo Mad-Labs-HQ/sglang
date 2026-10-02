@@ -213,7 +213,9 @@ class PreparePLENVMETest(unittest.TestCase):
 
         source, output, _, _ = self.integrity_checkpoint()
         (output / "unexpected-metadata.json").write_text('{"extra":true}')
-        with self.assertRaisesRegex(ValueError, "unexpected=.*unexpected-metadata.json"):
+        with self.assertRaisesRegex(
+            ValueError, "unexpected=.*unexpected-metadata.json"
+        ):
             self.check(source, output)
 
     def test_preflight_rejects_missing_ssd_stream_entrypoint(self):

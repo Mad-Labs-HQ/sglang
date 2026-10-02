@@ -6,9 +6,10 @@ import tempfile
 from pathlib import Path
 
 import torch
-from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from sglang_ssd_stream.backend import SSDStreamEmbedding
 from sglang_ssd_stream.config import load_manifest
+
+from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
 
 
 def _embedding(dtype: torch.dtype, rows: int = 1024, width: int = 160):

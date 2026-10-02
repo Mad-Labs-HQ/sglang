@@ -18,9 +18,7 @@ def _prepare_serve(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli,
         "_detect_hardware",
-        lambda: cli.Hardware(
-            "x86_64", "RTX PRO 6000 Blackwell", 97_887, (12, 0)
-        ),
+        lambda: cli.Hardware("x86_64", "RTX PRO 6000 Blackwell", 97_887, (12, 0)),
     )
     return snapshot, cuda_home
 
@@ -40,9 +38,7 @@ def test_model_revision_stays_pinned_across_software_runs(monkeypatch, tmp_path)
 
 def test_rtx_profile_uses_stable_context_and_native_mtp(tmp_path):
     args = cli._profile_args(
-        cli.Hardware(
-            "x86_64", "NVIDIA RTX PRO 6000 Blackwell", 97_887, (12, 0)
-        ),
+        cli.Hardware("x86_64", "NVIDIA RTX PRO 6000 Blackwell", 97_887, (12, 0)),
         tmp_path,
         None,
     )
@@ -59,9 +55,7 @@ def test_rtx_profile_uses_stable_context_and_native_mtp(tmp_path):
 
 def test_explicit_context_overrides_profile_default(tmp_path):
     args = cli._profile_args(
-        cli.Hardware(
-            "x86_64", "NVIDIA RTX PRO 6000 Blackwell", 97_887, (12, 0)
-        ),
+        cli.Hardware("x86_64", "NVIDIA RTX PRO 6000 Blackwell", 97_887, (12, 0)),
         tmp_path,
         131_072,
     )
