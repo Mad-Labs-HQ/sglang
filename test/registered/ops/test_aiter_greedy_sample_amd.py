@@ -36,6 +36,7 @@ def _mock_global_server_args(backend="pytorch"):
 
     class _DummyTPGroup:
         device_group = None
+        world_size = 1
 
     # Provide a TP group for sampler initialization without distributed setup.
     get_parallel().override_permanently(tp_group=_DummyTPGroup())
