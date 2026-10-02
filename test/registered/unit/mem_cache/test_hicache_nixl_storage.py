@@ -76,6 +76,44 @@ class MockHybridPool:
         return True
 
 
+def make_ple_mamba_host_pool(num_pages: int = 4, component_bytes: int = 8):
+    """A real MambaPoolHost (storage keys dispatch on its type) with two PLE siblings."""
+    from sglang.srt.mem_cache.pool_host.mamba import MambaPoolHost, _SlotSiblingLayout
+
+    pool = MambaPoolHost.__new__(MambaPoolHost)
+    pool.layout = "page_first"
+    pool.page_size = 1
+    pool.dtype = torch.uint8
+    pool.device = "cpu"
+    pool.pin_memory = False
+    pool.num_mamba_layers = 1
+    pool.temporal_dtype = torch.uint8
+    pool.conv_dtype = torch.uint8
+    pool.temporal_state_elem_size = component_bytes
+    pool.conv_state_shapes = [(component_bytes,)]
+    pool.conv_state_elem_sizes = [component_bytes]
+    pool.temporal_buffer = torch.zeros(
+        (num_pages, 1, 1, component_bytes), dtype=torch.uint8
+    )
+    pool.conv_buffer = [
+        torch.zeros((num_pages, 1, 1, component_bytes), dtype=torch.uint8)
+    ]
+    pool.slot_sibling_layouts = tuple(
+        _SlotSiblingLayout(
+            name=name,
+            device_layers=torch.zeros((1, num_pages, 16), dtype=torch.uint8),
+            device_layer_ptrs=torch.zeros(1, dtype=torch.uint64),
+            item_bytes=16,
+            host_stride=4096,
+        )
+        for name in ("ple_short_conv", "ple_ngram")
+    )
+    pool.slot_sibling_buffers = tuple(
+        torch.zeros((num_pages, 4096), dtype=torch.uint8) for _ in range(2)
+    )
+    return pool
+
+
 class MockMemPoolHost:
     """Minimal MHA-style HostKVCache stand-in supporting the v1 paths.
 
@@ -618,6 +656,69 @@ class TestNixlUnified(CustomTestCase):
         )
         self.assertEqual(len(captured["host_buffers"]), 4)
         self.assertEqual(captured["direction"], "WRITE")
+
+    def test_batch_set_v2_keys_ple_mamba_components_by_name(self):
+        """PLE side states are stored under stable per-component Mamba keys."""
+        pool = make_ple_mamba_host_pool()
+        self.hicache.register_mem_host_pool_v2(pool, PoolName.MAMBA)
+        self.assertTrue(self.hicache._hybrid_pool_ctx[PoolName.MAMBA].is_zero_copy)
+
+        captured = {}
+
+        def fake_batch_xfer(keys, key_strs, host_buffers, direction):
+            captured["keys"] = key_strs
+            captured["host_buffers"] = host_buffers
+            return [True] * len(key_strs)
+
+        self.hicache._batch_xfer = fake_batch_xfer
+        results = self.hicache.batch_set_v2(
+            [
+                PoolTransfer(
+                    name=PoolName.MAMBA,
+                    keys=["p0", "p1"],
+                    host_indices=torch.tensor([0, 1], dtype=torch.int64),
+                )
+            ]
+        )
+
+        self.assertEqual(results[PoolName.MAMBA], [True, True])
+        components = ["temporal", "conv_0", "ple_short_conv", "ple_ngram"]
+        self.assertEqual(
+            captured["keys"],
+            [
+                self.hicache._get_suffixed_key(page) + f"_mamba_{name}"
+                for page in ("p0", "p1")
+                for name in components
+            ],
+        )
+        self.assertEqual(
+            [size for _, size in captured["host_buffers"]], [8, 8, 4096, 4096] * 2
+        )
+
+    def test_batch_exists_v2_requires_every_ple_mamba_component(self):
+        """A page is a Mamba hit only when every component, PLE included, exists."""
+        pool = make_ple_mamba_host_pool()
+        self.hicache.register_mem_host_pool_v2(pool, PoolName.MAMBA)
+        self.hicache.batch_exists = lambda keys, extra_info=None: len(keys)
+        queried = []
+
+        def fake_query(keys):
+            queried.extend(keys)
+            return [
+                not (key.startswith("p1") and key.endswith("_mamba_ple_ngram"))
+                for key in keys
+            ]
+
+        self.hicache._query_keys_exist = fake_query
+        result = self.hicache.batch_exists_v2(
+            ["p0", "p1"],
+            [PoolTransfer(name=PoolName.MAMBA, keys=["p0", "p1"])],
+        )
+
+        self.assertEqual(len(queried), 8)
+        self.assertTrue(any(key.endswith("_mamba_ple_ngram") for key in queried))
+        self.assertEqual(result.kv_hit_pages, 1)
+        self.assertEqual(result.extra_pool_hit_pages[PoolName.MAMBA], 1)
 
     def test_batch_get_v2_uses_bounce_buffer_for_non_zero_copy_pool(self):
         pool = MockHybridPool(expose_zero_copy=False)

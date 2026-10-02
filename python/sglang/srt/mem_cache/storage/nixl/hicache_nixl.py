@@ -19,6 +19,7 @@ from sglang.srt.mem_cache.hicache_storage import (
     PoolTransferResult,
 )
 from sglang.srt.mem_cache.pool_host import HostKVCache
+from sglang.srt.mem_cache.pool_host.mamba import MambaPoolHost
 from sglang.srt.mem_cache.storage.mmap import alloc_mmap
 from sglang.srt.mem_cache.storage.nixl.nixl_cleaner import HiCacheL3Cleaner
 
@@ -198,12 +199,28 @@ class HiCacheNixl(HiCacheStorage):
         return [self._get_component_key(key, pool_name) for key in keys]
 
     def _get_hybrid_component_keys(
-        self, keys: List[str], pool_name: PoolName, key_multiplier: int
+        self,
+        keys: List[str],
+        pool_name: PoolName,
+        key_multiplier: int,
+        component_names: Optional[List[str]] = None,
     ) -> List[str]:
         if key_multiplier == 1:
             return self._get_component_keys(keys, pool_name)
 
-        if pool_name == PoolName.MAMBA:
+        if component_names is not None:
+            if len(component_names) != key_multiplier:
+                # Callers treat no keys as a miss / skipped transfer.
+                logger.error(
+                    "HiCacheNixl: pool %s names %s storage components but "
+                    "transfers %s per page",
+                    pool_name,
+                    len(component_names),
+                    key_multiplier,
+                )
+                return []
+            suffixes = [f"_{pool_name}_{name}" for name in component_names]
+        elif pool_name == PoolName.MAMBA:
             suffixes = [f"_{pool_name}_temporal"] + [
                 f"_{pool_name}_conv_{i}" for i in range(key_multiplier - 1)
             ]
@@ -479,11 +496,22 @@ class HiCacheNixl(HiCacheStorage):
     def _get_hybrid_key_multiplier(
         self, pool_name: PoolName, host_pool: HostKVCache
     ) -> int:
+        component_names = self._get_hybrid_component_names(host_pool)
+        if component_names is not None:
+            return len(component_names)
         if pool_name == PoolName.MAMBA:
             return 1 + len(getattr(host_pool, "conv_buffer", []) or [])
         if hasattr(host_pool, "v_buffer"):
             return 2
         return 1
+
+    @staticmethod
+    def _get_hybrid_component_names(host_pool: HostKVCache) -> Optional[List[str]]:
+        # Pools that name their per-page components (Mamba) key storage by name,
+        # in get_page_buffer_meta() pointer order.
+        if isinstance(host_pool, MambaPoolHost):
+            return host_pool.get_storage_component_names()
+        return None
 
     def _get_hybrid_zero_copy_buffers(
         self, transfer: PoolTransfer, ctx: _HybridPoolContext
@@ -509,7 +537,10 @@ class HiCacheNixl(HiCacheStorage):
             return [], [], 0
         key_multiplier = len(ptr_list) // page_num
         key_strs = self._get_hybrid_component_keys(
-            transfer.keys or [], transfer.name, key_multiplier
+            transfer.keys or [],
+            transfer.name,
+            key_multiplier,
+            component_names=self._get_hybrid_component_names(ctx.host_pool),
         )
         if len(key_strs) != len(ptr_list):
             logger.error(
@@ -907,7 +938,14 @@ class HiCacheNixl(HiCacheStorage):
                 else 1
             )
             component_keys = self._get_hybrid_component_keys(
-                keys[:kv_pages], transfer.name, key_multiplier
+                keys[:kv_pages],
+                transfer.name,
+                key_multiplier,
+                component_names=(
+                    self._get_hybrid_component_names(ctx.host_pool)
+                    if ctx.is_zero_copy
+                    else None
+                ),
             )
             exists_results = self._query_keys_exist(component_keys)
             page_exists = self._page_results(exists_results, key_multiplier)
