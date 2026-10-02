@@ -75,9 +75,17 @@ def _fake_host_pool_modules():
         pass
 
     pool_host_mla.MLATokenToKVPoolHost = MLATokenToKVPoolHost
+
+    pool_host_mamba = types.ModuleType("sglang.srt.mem_cache.pool_host.mamba")
+
+    class MambaPoolHost:
+        pass
+
+    pool_host_mamba.MambaPoolHost = MambaPoolHost
     return {
         "sglang.srt.mem_cache.pool_host": pool_host,
         "sglang.srt.mem_cache.pool_host.mla": pool_host_mla,
+        "sglang.srt.mem_cache.pool_host.mamba": pool_host_mamba,
     }
 
 

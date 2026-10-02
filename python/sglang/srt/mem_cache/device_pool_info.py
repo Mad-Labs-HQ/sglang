@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from enum import Enum
+from typing import Any
 
 import msgspec
 import torch
@@ -25,6 +26,9 @@ class MambaStateBufferInfo(msgspec.Struct, frozen=True, kw_only=True):
     temporal: torch.Tensor
     conv: tuple[torch.Tensor, ...]
     extra_checkpoint_buffers: tuple[torch.Tensor, ...] = ()
+    # Named slot-indexed side states (ple_state_pool.SlotStateHiCacheSpec). The
+    # host pool mirrors each into page-aligned rows that storage keys by name.
+    slot_siblings: tuple[Any, ...] = ()
 
     def validate(self, *, layer_ids: tuple[int, ...] | None = None) -> None:
         shape = tuple(self.temporal.shape)
@@ -53,7 +57,11 @@ class MambaStateBufferInfo(msgspec.Struct, frozen=True, kw_only=True):
                     f"Mamba extra_checkpoint_buffers[{index}].shape={tuple(buffer.shape)} "
                     f"must start with checkpoint capacity {shape[1]}"
                 )
-        for buffer in (*self.conv, *self.extra_checkpoint_buffers):
+        for buffer in (
+            *self.conv,
+            *self.extra_checkpoint_buffers,
+            *(spec.tensor for spec in self.slot_siblings),
+        ):
             if buffer.device != self.temporal.device:
                 raise ValueError(
                     f"Mamba buffer.device={buffer.device}, expected {self.temporal.device}"

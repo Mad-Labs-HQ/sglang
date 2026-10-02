@@ -1085,10 +1085,11 @@ class MambaPool:
                 buffer_info=MambaStateBufferInfo(
                     temporal=self.mamba_cache.temporal,
                     conv=tuple(self.mamba_cache.conv),
-                    extra_checkpoint_buffers=tuple(
-                        buffer
+                    # Registered side states go to the host pool by name, so
+                    # NIXL and Mooncake key them and keep zero-copy pages.
+                    slot_siblings=tuple(
+                        sibling.hicache_transfer_spec()
                         for sibling in self._slot_siblings
-                        for _, buffer, _, _ in sibling.iter_transfer_state_entries()
                     ),
                 ),
             ),
@@ -1363,7 +1364,11 @@ class MambaPool:
         return subdims_per_tensor
 
     def get_kv_size_bytes(self):
-        return self.mamba_cache.mem_usage_bytes()
+        sibling_bytes = sum(
+            sibling.hicache_transfer_spec().tensor.nbytes
+            for sibling in self._slot_siblings
+        )
+        return self.mamba_cache.mem_usage_bytes() + sibling_bytes
 
 
 class HybridReqToTokenPool(ReqToTokenPool):
