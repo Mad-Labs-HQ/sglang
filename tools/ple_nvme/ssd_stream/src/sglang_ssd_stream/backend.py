@@ -13,7 +13,7 @@ from sglang.srt.distributed import get_tp_group, tensor_model_parallel_all_reduc
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
 )
-from sglang.srt.layers.communicator import get_attn_tp_context
+from sglang.srt.layers.layer_boundary import get_attn_tp_context
 from sglang.srt.layers.dp_attention import attn_tp_all_reduce, is_allocation_symmetric
 from sglang.srt.layers.quantization.unquant import UnquantizedEmbeddingMethod
 from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
