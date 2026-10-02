@@ -2051,6 +2051,20 @@ class TestHiCacheArgs(CustomTestCase):
                 else:
                     handle_hicache(args)
 
+    def test_hicache_mamba_size_must_fit_inside_hicache_size(self):
+        for hicache_size, mamba_size in ((0, 13.12), (50, 0), (50, 50), (50, 60)):
+            with self.subTest(hicache_size=hicache_size, mamba_size=mamba_size):
+                args = ServerArgs(
+                    model_path="dummy",
+                    hicache_size=hicache_size,
+                    hicache_mamba_size=mamba_size,
+                )
+                with self.assertRaisesRegex(ValueError, "--hicache-mamba-size"):
+                    handle_hicache_ratio_default(args)
+        handle_hicache_ratio_default(
+            ServerArgs(model_path="dummy", hicache_size=50, hicache_mamba_size=13.12)
+        )
+
     def _make_args(self, **overrides) -> ServerArgs:
         # Not resolved: a dummy model path takes the pipeline's early return,
         # so `_handle_hicache` would never run. Its one prerequisite (the

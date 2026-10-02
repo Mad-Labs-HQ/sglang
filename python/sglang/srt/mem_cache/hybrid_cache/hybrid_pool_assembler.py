@@ -1307,6 +1307,11 @@ def build_hybrid_mamba_swa_stack(
     mamba_allocator = params.req_to_token_pool.mamba_allocator
     kv_host_size, swa_host_size, mamba_host_size = None, None, 0
     if get_memory().hicache_size > 0:
+        if get_memory().hicache_mamba_size is not None:
+            raise ValueError(
+                "--hicache-mamba-size is not supported for hybrid Mamba models "
+                "with sliding-window attention."
+            )
         kv_host_size, swa_host_size, mamba_host_size = _split_hicache_size(
             get_memory().hicache_size, (full_kv_pool, swa_kv_pool, mamba_pool)
         )

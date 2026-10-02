@@ -96,6 +96,12 @@ def handle_hicache_ratio_default(server_args: Any):
     fraction = cfg.hicache_host_memory_fraction
     if fraction is not None and not 0 < fraction <= 1:
         raise ValueError("--hicache-host-memory-fraction must be in (0, 1].")
+    mamba_size = cfg.hicache_mamba_size
+    if mamba_size is not None and not 0 < mamba_size < cfg.hicache_size:
+        raise ValueError(
+            "--hicache-mamba-size carves the host Mamba pool out of --hicache-size, "
+            "so it needs --hicache-size and must lie strictly between 0 and it."
+        )
     fields = {}
     if cfg.hicache_ratio is None and cfg.disaggregation_mode != "decode":
         fields["hicache_ratio"] = (
