@@ -7,6 +7,7 @@ path that SGLANG_SM120_ONLINE_MXFP8 installs on Flash-Next's BF16 projections.
 from __future__ import annotations
 
 import math
+import sys
 
 import pytest
 import torch
@@ -222,3 +223,7 @@ def test_mxfp8_linear_cuda_graph_replays_mutated_input(online_mxfp8_method) -> N
     _assert_normalized_error(
         graph_output.clone(), expected, max_nrmse=0.12, min_cosine=0.99
     )
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))
