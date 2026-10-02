@@ -10,13 +10,13 @@ from unittest import mock
 
 import torch
 
+from sglang.kernels.ops.gemm.hc_mix import _rowwise_fp8_pair, fused_hc_mix_supported
 from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     attach_rowwise_ingest,
     configure_online_fp8,
     dequantize_rowwise_weight,
     rowwise_scale_of,
 )
-from sglang.kernels.ops.gemm.hc_mix import _rowwise_fp8_pair, fused_hc_mix_supported
 from sglang.srt.layers.hyperconnection import GatedResidual, HyperConnectionConfig
 from sglang.test.test_utils import CustomTestCase
 
