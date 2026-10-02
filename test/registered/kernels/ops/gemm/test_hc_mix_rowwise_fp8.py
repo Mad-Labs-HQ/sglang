@@ -7,6 +7,7 @@ prefill rows fall back to the torch.compile path on transient BF16 operands.
 from __future__ import annotations
 
 import math
+import sys
 
 import pytest
 import torch
@@ -161,3 +162,7 @@ def test_rowwise_hyperconnection_cuda_graph_replays_mutated_input(
     _assert_normalized_error(
         graph_output.clone(), expected, max_nrmse=0.06, min_cosine=0.995
     )
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))
