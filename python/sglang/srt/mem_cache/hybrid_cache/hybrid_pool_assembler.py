@@ -176,6 +176,22 @@ def build_kv_host_pool(
     )
 
 
+def _madlabs_mamba_host_override(hicache_size, kv_host_size, mamba_host_size):
+    """SPIKE: SGLANG_MADLABS_MAMBA_HOST_GB sets the host Mamba pool directly and
+    gives the rest of --hicache-size to KV, so the two engines can be compared
+    at the same total with their Mamba shares swapped."""
+    import os
+
+    override = os.environ.get("SGLANG_MADLABS_MAMBA_HOST_GB")
+    if not override:
+        return kv_host_size, mamba_host_size
+    want = float(override)
+    logger.info("MADLABS host Mamba pool override: %.2f GB (proportional split gave %.2f GB)",
+                want, mamba_host_size)
+    kv = hicache_size - want if kv_host_size is not None else None
+    return kv, want
+
+
 def _split_hicache_size(
     hicache_size: int, kv_pools: tuple[Any, ...]
 ) -> tuple[float, ...]:
@@ -1146,6 +1162,9 @@ def build_hybrid_mamba_stack(
     if get_memory().hicache_size > 0:
         kv_host_size, mamba_host_size = _split_hicache_size(
             get_memory().hicache_size, (kv_pool, mamba_pool)
+        )
+        kv_host_size, mamba_host_size = _madlabs_mamba_host_override(
+            get_memory().hicache_size, kv_host_size, mamba_host_size
         )
     kv_host_pool = build_kv_host_pool(
         kv_pool=kv_pool,
