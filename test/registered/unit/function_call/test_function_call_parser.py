@@ -2311,8 +2311,7 @@ class TestQwen3CoderStreamingFraming(unittest.TestCase):
             for name in self.names
         ]
         self.bodies = [
-            f"<tool_call><function={name}>"
-            f"<parameter=value>{args['value']}</parameter>"
+            f"<tool_call><function={name}><parameter=value>{args['value']}</parameter>"
             for name, args in zip(self.names, self.arguments)
         ]
         self.end = "</function></tool_call>"
