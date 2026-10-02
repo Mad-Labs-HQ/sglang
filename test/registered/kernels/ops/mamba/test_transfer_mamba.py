@@ -136,6 +136,8 @@ def assert_host_mock_complete(host):
         "temporal_device_ptrs",
         "conv_device_ptrs",
         "lock",
+        "slot_state_entries",
+        "slot_state_buffers",
     ]
     missing = [attr for attr in required if not hasattr(host, attr)]
     assert not missing, f"Mock MambaPoolHost missing attributes: {missing}"
