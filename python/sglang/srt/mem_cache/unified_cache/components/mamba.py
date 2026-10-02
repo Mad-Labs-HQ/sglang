@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Sequence
 
 import torch
 
+from sglang.srt.mem_cache import madlabs_trace
 from sglang.srt.mem_cache.base_prefix_cache import (
     DecLockRefParams,
     EvictParams,
@@ -232,6 +233,9 @@ class MambaComponent(TreeComponent):
     ) -> None:
         assert params.mamba_value is not None
         if is_new_leaf:
+            if madlabs_trace.ENABLED:
+                madlabs_trace.emit("state", node=node.id, depth=madlabs_trace.depth(node),
+                                   chunked=bool(params.chunked))
             node.component_data[self.component_type].value = params.mamba_value
             self.tree_core.lru_lists[self.component_type].insert_mru(node)
             self.tree_core.component_evictable_size_[self.component_type] += len(
@@ -276,7 +280,11 @@ class MambaComponent(TreeComponent):
         cap = self.mamba_max_states_per_path
         if cap < 0:
             return
+        with madlabs_trace.cause("cap"):
+            self._evict_excess_path_states_traced(tail, device_frees, host_frees)
 
+    def _evict_excess_path_states_traced(self, tail, device_frees, host_frees):
+        cap = self.mamba_max_states_per_path
         ct = self.component_type
         holders = []
         node = tail
@@ -330,6 +338,16 @@ class MambaComponent(TreeComponent):
         cd = node.component_data[self.component_type]
         freed = 0
         host_freed = 0
+        if madlabs_trace.ENABLED:
+            dev = EvictLayer.DEVICE in target and cd.value is not None
+            host = EvictLayer.HOST in target and cd.host_value is not None
+            if dev or host:
+                pool = self._mamba_pool_host
+                madlabs_trace.emit(
+                    "drop", node=node.id, depth=madlabs_trace.depth(node),
+                    dev=dev, host=host,
+                    kept_host=dev and not host and cd.host_value is not None,
+                    host_free=pool.available_size() if pool is not None else None)
 
         # Device layer
         if EvictLayer.DEVICE in target and cd.value is not None:

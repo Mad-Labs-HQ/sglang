@@ -893,6 +893,7 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
             if key_offset < len(key):
                 child_key = key.child_key_at(key_offset, self.page_size)
 
+        self._trace_last_kv_node = node if node is not self.root_node else None
         return (
             value,
             best_match_node,

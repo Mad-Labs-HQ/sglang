@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 import torch
 from numpy import float64
 
+from sglang.srt.mem_cache import madlabs_trace
 from sglang.srt.mem_cache.base_prefix_cache import (
     DecLockRefParams,
     IncLockRefResult,
@@ -516,6 +517,7 @@ class TreeComponent(ABC):
         )
         self._evict_device_start(request_cnt)
         self.is_evict_device_ongoing = True
+        madlabs_trace.push_cause(f"gpu_pressure:{self.component_type.name}")
 
     def evict_device_next_node(
         self,
@@ -540,6 +542,7 @@ class TreeComponent(ABC):
         )
         self._evict_device_end()
         self.is_evict_device_ongoing = False
+        madlabs_trace.pop_cause()
 
     @abstractmethod
     def _evict_device_start(self, request_cnt: int) -> None:
