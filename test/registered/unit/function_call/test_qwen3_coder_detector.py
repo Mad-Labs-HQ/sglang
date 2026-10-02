@@ -1,6 +1,7 @@
 """qwen3_coder: repairs for Qwen3.8-Flash-Next tool-call drift."""
 
 import json
+import sys
 
 import pytest
 
@@ -240,7 +241,7 @@ def test_non_rfc_numbers_are_never_unwrapped(width, payload):
     """json.dumps would write a bare NaN/Infinity that no strict client parses.
 
     Leaving the payload as an opaque string keeps the call merely wrong, which
-    is what it is today, instead of making the arguments document unparseable.
+    is what it is today, instead of making the arguments document unparsable.
     """
     tools = ENVELOPE_TOOLS + [
         Tool(
@@ -672,3 +673,7 @@ def test_implicit_reasoning_close_still_validates_unknown_name(width):
     text, increments = tool_parser.parse_stream_end()
     assert normal + text == literal
     assert calls + increments == []
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))
