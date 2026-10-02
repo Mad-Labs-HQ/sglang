@@ -204,6 +204,8 @@ class TestReleaseWithholdsPublication(CustomTestCase):
         cache.insert_req.assert_called_once_with(req, up_to=3)
         # The tree took the request's state over, so components keep it.
         cache.component.cleanup_after_caching_req.assert_not_called()
+        cache.req_to_token_pool.free.assert_called_once_with(req)
+        self.assertTrue(req.kv.is_kv_released)
 
     def test_opted_out_request_is_freed_not_published(self):
         req, cache = _req(skip_cache_insert=True), _tree_cache()
@@ -219,6 +221,9 @@ class TestReleaseWithholdsPublication(CustomTestCase):
         cache.component.cleanup_after_caching_req.assert_called_once_with(
             req, is_finished=True
         )
+        # ...and the request's row goes back and is marked released.
+        cache.req_to_token_pool.free.assert_called_once_with(req)
+        self.assertTrue(req.kv.is_kv_released)
 
 
 class TestCheckpointCaching(CustomTestCase):
