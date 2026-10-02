@@ -389,9 +389,11 @@ class FlexKVRadixCache(RadixCache):
         if not inserted:
             self._load_markers.pop(req.cache_request_handle, None)
 
-    def insert_req(self, req: Req, *, up_to: int) -> None:  # type: ignore[override]
+    def insert_req(  # type: ignore[override]
+        self, req: Req, *, up_to: int, chunked: bool = False
+    ) -> None:
         """Base insert_req; a finished request also fires an async FlexKV store."""
-        super().insert_req(req, up_to=up_to)
+        super().insert_req(req, up_to=up_to, chunked=chunked)
         if not req.finished():
             return
 

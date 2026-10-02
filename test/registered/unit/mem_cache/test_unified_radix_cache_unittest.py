@@ -1918,6 +1918,53 @@ class UnifiedRadixCacheSuite:
         )
         cache.sanity_check()
 
+    def test_chunked_checkpoint_counts_no_hit(self):
+        """A chunked-prefill checkpoint must not count hits: a hit is what fires
+        the write-through backup, and backing up every chunk's Mamba state
+        floods the host Mamba pool. The first insert of the whole prompt counts
+        each node once."""
+        if self.cfg.has_swa:
+            self.skipTest("the SWA fixture needs its own eviction setup")
+        cache, allocator, req_to_token_pool = build_fixture(self.cfg)
+        req = self._make_req(req_to_token_pool)
+        tokens = self._make_seq(1, 3)
+        chunk_end = 2 * self.cfg.page_size
+        req.origin_input_ids = array("q", tokens)
+        req.output_ids = array("q")
+        req.full_untruncated_fill_ids = array("q", tokens)
+        kv_indices = self._alloc(allocator, len(tokens))
+        req_to_token_pool.write(
+            (req.kv.req_pool_idx, slice(0, len(tokens))), kv_indices
+        )
+        req.kv.kv_committed_len = len(tokens)
+        req.last_node = cache.root_node_handle()
+        req.kv.cache_protected_len = 0
+        req.lock_receipt = DecLockRefParams()
+        req.extra_key = None
+
+        req.set_extend_range(0, chunk_end)
+        if self.cfg.has_mamba:
+            req.kv.mamba_last_track_seqlen = chunk_end
+        cache.insert_req(req, up_to=chunk_end, chunked=True)
+
+        self.assertEqual(req.kv.cache_inserted_len, 0)
+        (first,) = _node_children(cache, cache.root_node_handle())
+        self.assertEqual(cache.tree_core.get_node_hit_count(first), 0)
+
+        req.set_extend_range(len(req.prefix_indices), len(tokens))
+        if self.cfg.has_mamba:
+            req.kv.mamba_last_track_seqlen = len(tokens)
+        cache.insert_req(req, up_to=len(tokens))
+
+        self.assertEqual(req.kv.cache_inserted_len, len(tokens))
+        node = cache.root_node_handle()
+        while _node_children(cache, node):
+            (node,) = _node_children(cache, node)
+            self.assertEqual(cache.tree_core.get_node_hit_count(node), 1)
+
+        cache.dec_lock_ref(req.last_node, req.lock_receipt)
+        cache.sanity_check()
+
     def test_swa_unfinished_req_preserves_existing_eviction_boundary(self):
         if not self.cfg.has_swa or self.cfg.has_mamba:
             self.skipTest("requires SWA without Mamba")

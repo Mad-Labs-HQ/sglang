@@ -494,7 +494,7 @@ class RadixCache(BasePrefixCache):
         )
         return radix_key, kv_indices, result.prefix_len
 
-    def insert_req(self, req: Req, *, up_to: int):
+    def insert_req(self, req: Req, *, up_to: int, chunked: bool = False):
         if self.disable:
             return
         token_ids = req.full_untruncated_fill_ids[:up_to]

@@ -194,7 +194,7 @@ def checkpoint_kv_cache(
     if getattr(req, "skip_cache_insert", False) and not chunked:
         return
 
-    tree_cache.insert_req(req, up_to=req.extend_range.end)
+    tree_cache.insert_req(req, up_to=req.extend_range.end, chunked=chunked)
 
 
 def evict_from_tree_cache(
