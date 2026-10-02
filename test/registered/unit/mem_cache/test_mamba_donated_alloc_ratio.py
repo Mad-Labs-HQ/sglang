@@ -298,9 +298,7 @@ class TestChunkedStashOnExhaustedPool(unittest.TestCase):
 
         self.assertEqual(cache_len, 0)
         self.assertIsNone(insert_params.mamba_value)
-        self.assertTrue(
-            torch.equal(req.kv.mamba_ping_pong_track_buffer, buffer_before)
-        )
+        self.assertTrue(torch.equal(req.kv.mamba_ping_pong_track_buffer, buffer_before))
         self.assertEqual(cache.allocator.free_ids, [])
         self.assertEqual(
             cache.alloc_evict_params, [EvictParams(num_tokens=0, mamba_num=1)]

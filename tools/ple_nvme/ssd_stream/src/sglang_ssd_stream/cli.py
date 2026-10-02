@@ -317,10 +317,10 @@ def _dgx_spark_args(snapshot: Path, context: int) -> list[str]:
 
 
 def _supports_portable_nvfp4(hardware: Hardware) -> bool:
-    return (
-        hardware.architecture == "x86_64"
-        and (8, 0) <= hardware.compute_capability < (13, 0)
-    )
+    return hardware.architecture == "x86_64" and (
+        8,
+        0,
+    ) <= hardware.compute_capability < (13, 0)
 
 
 def _portable_args(
@@ -328,9 +328,7 @@ def _portable_args(
     snapshot: Path,
     context: int,
 ) -> list[str]:
-    kv_dtype = (
-        "fp8_e4m3" if hardware.compute_capability >= (10, 0) else "bfloat16"
-    )
+    kv_dtype = "fp8_e4m3" if hardware.compute_capability >= (10, 0) else "bfloat16"
     args = [
         "--trust-remote-code",
         "--model-path",
