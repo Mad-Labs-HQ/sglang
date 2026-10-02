@@ -198,6 +198,21 @@ def _split_hicache_size(
     )
 
 
+def _split_mamba_hicache_size(
+    hicache_size: int, kv_pool: Any, mamba_pool: Any, mamba_size: Optional[float]
+) -> tuple[float, float]:
+    """(host KV GB, host Mamba GB) out of hicache_size: the declared Mamba
+    share when set, else the proportional split."""
+    if mamba_size is None:
+        return _split_hicache_size(hicache_size, (kv_pool, mamba_pool))
+    if not 0 < mamba_size < hicache_size:
+        raise ValueError(
+            f"--hicache-mamba-size {mamba_size} must be between 0 and "
+            f"--hicache-size {hicache_size}"
+        )
+    return hicache_size - mamba_size, mamba_size
+
+
 def build_pool_entry(
     *,
     name: PoolName,
@@ -1150,8 +1165,11 @@ def build_hybrid_mamba_stack(
     )
     kv_host_size, mamba_host_size = None, 0
     if get_memory().hicache_size > 0:
-        kv_host_size, mamba_host_size = _split_hicache_size(
-            get_memory().hicache_size, (kv_pool, mamba_pool)
+        kv_host_size, mamba_host_size = _split_mamba_hicache_size(
+            get_memory().hicache_size,
+            kv_pool,
+            mamba_pool,
+            get_memory().hicache_mamba_size,
         )
     if qsa_pool is not None and kv_host_size is not None:
         kv_bytes = sum(kv_pool.get_kv_size_bytes())

@@ -23,6 +23,7 @@ from sglang.srt.mem_cache.hybrid_cache.hybrid_pool_assembler import (
     _MambaSwaStrategy,
     _require_single_row_dsv4_swa_pages,
     _split_hicache_size,
+    _split_mamba_hicache_size,
     _SwaStrategy,
     build_full_draft_pools,
     build_host_pool_group,
@@ -115,6 +116,28 @@ class TestSplitHicacheSize(CustomTestCase):
         )
         self.assertEqual(shares, (55.0, 25.0, 20.0))  # proportional to device KV bytes
         self.assertEqual(sum(shares), 100)  # total budget preserved, not doubled
+
+    def test_declared_mamba_share_ignores_device_bytes(self):
+        # Whatever the device pools weigh, the declared Mamba share holds.
+        for kv_bytes, mamba_bytes in (
+            (10 * 10**9, 3.6 * 10**9),
+            (10 * 10**9, 2 * 10**9),
+        ):
+            shares = _split_mamba_hicache_size(
+                50, _Pool(kv_bytes), _Pool(mamba_bytes), 13.12
+            )
+            self.assertEqual(shares, (50 - 13.12, 13.12))
+
+    def test_undeclared_mamba_share_is_proportional(self):
+        shares = _split_mamba_hicache_size(
+            100, _Pool(75 * 10**9), _Pool(25 * 10**9), None
+        )
+        self.assertEqual(shares, (75.0, 25.0))
+
+    def test_declared_mamba_share_must_leave_room_for_kv(self):
+        for bad in (0, 50, 60):
+            with self.assertRaises(ValueError):
+                _split_mamba_hicache_size(50, _Pool(1), _Pool(1), bad)
 
 
 class TestHybridStageLayerMappings(CustomTestCase):
