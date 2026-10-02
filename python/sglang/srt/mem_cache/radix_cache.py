@@ -507,7 +507,7 @@ class RadixCache(BasePrefixCache):
         )
         return radix_key, kv_indices, result.prefix_len
 
-    def checkpoint(self, req: Req, *, up_to: int):
+    def checkpoint(self, req: Req, *, up_to: int, chunked: bool = False):
         if self.disable:
             return
         token_ids = req.full_untruncated_fill_ids[:up_to]

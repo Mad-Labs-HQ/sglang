@@ -283,7 +283,7 @@ def checkpoint_kv_cache(
     # opinion, and must not lose its KV bookkeeping over a missing attribute.
     opted_out = getattr(req, "skip_cache_insert", False) and not chunked
     if not req.skip_radix_cache_insert and not opted_out:
-        tree_cache.checkpoint(req, up_to=req.extend_end)
+        tree_cache.checkpoint(req, up_to=req.extend_end, chunked=chunked)
     # The next extend resumes after this one, published or not.
     req.prefix_len = req.extend_end
 

@@ -1123,7 +1123,9 @@ class UnifiedRadixCache(BasePrefixCache):
             return
         self.checkpoint_into_tree(req, up_to=up_to, **kwargs)
 
-    def checkpoint_into_tree(self, req: Req, *, up_to: int, **kwargs) -> None:
+    def checkpoint_into_tree(
+        self, req: Req, *, up_to: int, chunked: bool = False, **kwargs
+    ) -> None:
         """Insert ``[cache_protected_len, up_to)`` of the request's record and
         move its tree lock onto the node the insert ended on."""
         # A finished request hands its component state (mamba) to the tree
@@ -1142,9 +1144,14 @@ class UnifiedRadixCache(BasePrefixCache):
         ]
 
         # components prepare insert data + return effective cache_len
+        # A chunked-prefill checkpoint counts no hit: only nodes past
+        # inserted_len count, and a hit is what fires the write-through
+        # backup. Counting chunk stores backs up every chunk's Mamba state and
+        # floods the host Mamba pool; the first insert of the whole prompt
+        # counts these nodes instead, which is why cache_inserted_len stays.
         insert_params = InsertParams(
             prev_prefix_len=req.kv.cache_protected_len,
-            inserted_len=req.kv.cache_inserted_len,
+            inserted_len=up_to if chunked else req.kv.cache_inserted_len,
             priority=req.priority or 0,
             session_id=req.session_id,
             rotation_base=req.kv_rotation_base,
@@ -1214,7 +1221,8 @@ class UnifiedRadixCache(BasePrefixCache):
                     req, is_finished=is_finished, insert_params=insert_params
                 )
             return
-        req.kv.cache_inserted_len = max(req.kv.cache_inserted_len, page_aligned_len)
+        if not chunked:
+            req.kv.cache_inserted_len = max(req.kv.cache_inserted_len, page_aligned_len)
 
         # Split the leaf at the prompt boundary so eviction can drop the output
         # KV without the prompt. prev_prefix_len keeps the overlapping indices

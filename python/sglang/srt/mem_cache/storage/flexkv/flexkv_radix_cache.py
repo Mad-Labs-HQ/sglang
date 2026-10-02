@@ -379,9 +379,11 @@ class FlexKVRadixCache(RadixCache):
         if not checkpointed:
             self._load_markers.pop(req.cache_request_handle, None)
 
-    def checkpoint(self, req: Req, *, up_to: int) -> None:  # type: ignore[override]
+    def checkpoint(  # type: ignore[override]
+        self, req: Req, *, up_to: int, chunked: bool = False
+    ) -> None:
         """Base checkpoint; a finished request also fires an async FlexKV store."""
-        super().checkpoint(req, up_to=up_to)
+        super().checkpoint(req, up_to=up_to, chunked=chunked)
         if not req.finished():
             return
 
