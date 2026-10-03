@@ -235,7 +235,7 @@ class TestCheckpointCaching(CustomTestCase):
     def test_default_request_is_cached_after_prefill(self):
         req, cache = self._unfinished(), _tree_cache()
         checkpoint_kv_cache(req, cache)
-        cache.insert_req.assert_called_once_with(req, up_to=3)
+        cache.insert_req.assert_called_once_with(req, up_to=3, chunked=False)
 
     def test_opted_out_request_is_not_cached_after_prefill(self):
         req, cache = self._unfinished(skip_cache_insert=True), _tree_cache()
@@ -247,7 +247,7 @@ class TestCheckpointCaching(CustomTestCase):
         skipping it would re-prefill the same chunk forever."""
         req, cache = self._unfinished(skip_cache_insert=True), _tree_cache()
         checkpoint_kv_cache(req, cache, chunked=True)
-        cache.insert_req.assert_called_once_with(req, up_to=3)
+        cache.insert_req.assert_called_once_with(req, up_to=3, chunked=True)
 
     def test_req_without_init_is_treated_as_default(self):
         req = SimpleNamespace(
@@ -258,7 +258,7 @@ class TestCheckpointCaching(CustomTestCase):
         )
         cache = _tree_cache()
         checkpoint_kv_cache(req, cache)
-        cache.insert_req.assert_called_once_with(req, up_to=3)
+        cache.insert_req.assert_called_once_with(req, up_to=3, chunked=False)
 
 
 if __name__ == "__main__":
