@@ -1090,6 +1090,16 @@ class MambaPool:
                     slot_siblings=tuple(
                         sibling.hicache_transfer_spec()
                         for sibling in self._slot_siblings
+                        if hasattr(sibling, "hicache_transfer_spec")
+                    ),
+                    # A side state that only describes its buffers the
+                    # upstream way (iter_transfer_state_entries) keeps
+                    # upstream's host-tier path; it has no storage keys.
+                    extra_checkpoint_buffers=tuple(
+                        buffer
+                        for sibling in self._slot_siblings
+                        if not hasattr(sibling, "hicache_transfer_spec")
+                        for _, buffer, _, _ in sibling.iter_transfer_state_entries()
                     ),
                 ),
             ),
