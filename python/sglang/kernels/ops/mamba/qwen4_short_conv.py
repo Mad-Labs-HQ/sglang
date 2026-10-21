@@ -135,7 +135,8 @@ def _qwen4_varlen_conv_kernel(
     STATE_LEN: tl.constexpr,
     BLOCK_CHANNELS: tl.constexpr,
 ):
-    token = tl.program_id(0)
+    # int64: token * CHANNELS overflows int32 past about 210k tokens in one forward.
+    token = tl.program_id(0).to(tl.int64)
     channel = tl.program_id(1) * BLOCK_CHANNELS + tl.arange(0, BLOCK_CHANNELS)
     mask = (token < num_tokens) & (channel < CHANNELS)
     req = tl.load(req_indices_ptr + token, mask=token < num_tokens, other=0)

@@ -114,7 +114,9 @@ def _track(lengths, track_slots):
     return track_slots, mask, aligned
 
 
-def _forward_batch(lengths, slots, *, track=None, processed_tokens=None):
+def _forward_batch(
+    lengths, slots, *, track=None, processed_tokens=None, track_dtype=torch.int64
+):
     batch = SimpleNamespace(
         forward_mode=ForwardMode.EXTEND,
         _original_forward_mode=None,
@@ -132,9 +134,9 @@ def _forward_batch(lengths, slots, *, track=None, processed_tokens=None):
     )
     if track is not None:
         track_slots, mask, aligned = track
-        aligned = torch.tensor(aligned, dtype=torch.int64, device="cuda")
+        aligned = torch.tensor(aligned, dtype=track_dtype, device="cuda")
         batch.mamba_track_indices = torch.tensor(
-            track_slots, dtype=torch.int64, device="cuda"
+            track_slots, dtype=track_dtype, device="cuda"
         )
         batch.mamba_track_mask = torch.tensor(mask, dtype=torch.bool, device="cuda")
         batch.mamba_track_aligned_lens = lambda: aligned
@@ -224,6 +226,7 @@ class TestQwen4PackedPrefillBitwise(_BitwiseMixin, CustomTestCase):
         track=False,
         state_dtype=torch.bfloat16,
         negative_zeros=False,
+        track_dtype=torch.int64,
     ):
         generator = _generator(seed)
         rows = len(lengths)
@@ -244,7 +247,9 @@ class TestQwen4PackedPrefillBitwise(_BitwiseMixin, CustomTestCase):
         expected, padded_calls = _short_conv(
             layer,
             x,
-            _forward_batch(lengths, main_slots, track=track_spec),
+            _forward_batch(
+                lengths, main_slots, track=track_spec, track_dtype=track_dtype
+            ),
             padded_state,
             packed=False,
         )
@@ -252,7 +257,9 @@ class TestQwen4PackedPrefillBitwise(_BitwiseMixin, CustomTestCase):
         actual, packed_calls = _short_conv(
             layer,
             x,
-            _forward_batch(lengths, main_slots, track=track_spec),
+            _forward_batch(
+                lengths, main_slots, track=track_spec, track_dtype=track_dtype
+            ),
             packed_state,
             packed=True,
         )
@@ -272,6 +279,15 @@ class TestQwen4PackedPrefillBitwise(_BitwiseMixin, CustomTestCase):
                 for seed in SEEDS:
                     with self.subTest(lengths=lengths, track=track, seed=seed):
                         self._compare(lengths, seed=seed, track=track)
+
+    def test_int32_track_metadata_matches_bitwise(self):
+        # Replay reads track slots and seqlens from int32 registry buffers; the packed
+        # kernel takes int64 only, so the call site must normalise rather than raise.
+        for lengths in CASES:
+            with self.subTest(lengths=lengths):
+                self._compare(
+                    lengths, seed=SEEDS[0], track=True, track_dtype=torch.int32
+                )
 
     def test_fp32_state_matches_bitwise(self):
         for lengths in ([2, 3, 8, 9, 10], [0, 5, 0, 12, 0, 0], [3860] + [40] * 5):

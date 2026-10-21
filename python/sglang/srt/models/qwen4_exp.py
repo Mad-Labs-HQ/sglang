@@ -1236,6 +1236,11 @@ class Qwen4ExpPLELayer(nn.Module):
 
             track = _ple_track_targets(forward_batch, batch)
             track_indices, track_offsets = track if track is not None else (None, None)
+            if track_indices is not None:
+                # The packed kernel requires contiguous int64 indices and raises otherwise;
+                # replay-time slots can be int32, so normalise here instead of failing the forward.
+                track_indices = track_indices.long().contiguous()
+                track_offsets = track_offsets.long().contiguous()
             conv_output = fused_qwen4_varlen_conv(
                 x,
                 self.conv1d.weight,
@@ -1473,6 +1478,7 @@ class Qwen4ExpPLELayer(nn.Module):
             embeddings = self.ple_embedding(batch, forward_batch)
         key, _ = self.key_proj(embeddings)
         value, _ = self.value_proj(embeddings)
+        del embeddings
         token_count = hidden_states.shape[0]
         hidden_size = self.hidden_size
         hc_count = self.hc_count
@@ -1484,6 +1490,7 @@ class Qwen4ExpPLELayer(nn.Module):
         key = key.reshape(token_count, hc_count, hidden_size)
         query = hidden_states.reshape(token_count, hc_count, hidden_size)
         key_normed = self._apply_ple_norm(self.norm_key, key)
+        del key
         query_normed = self._apply_ple_norm(self.norm_query, query)
         from sglang.kernels.ops.elementwise.qwen4_gate import (
             can_fuse_qwen4_gate_reduce,
@@ -1515,9 +1522,9 @@ class Qwen4ExpPLELayer(nn.Module):
                 gate = torch.sigmoid(gate)
                 gated_value = gate * value.unsqueeze(-2)
         # Only gated_value feeds what follows. Releasing the gate inputs here
-        # (three [tokens, channels] and two [tokens, hidden] tensors) keeps
-        # them out of the conv's peak.
-        del embeddings, key, value, key_normed, query_normed
+        # keeps them out of the conv's peak; embeddings and key went as soon as
+        # their last reader ran, which keeps them out of the gate's peak too.
+        del value, key_normed, query_normed
         gated_value_normed = self._apply_ple_norm(self.norm_conv, gated_value)
         gated_value = gated_value.flatten(-2)
         gated_value_normed = gated_value_normed.flatten(-2)
