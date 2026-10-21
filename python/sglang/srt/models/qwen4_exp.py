@@ -98,7 +98,13 @@ from sglang.srt.models.qwen4_exp_ple_table import (
     make_ple_file_rss_trimmer,
 )
 from sglang.srt.runtime_context import get_parallel, linear_attn_parallel_group
-from sglang.srt.utils import get_bool_env_var, is_cuda, is_hip, logger
+from sglang.srt.utils import (
+    get_bool_env_var,
+    is_cuda,
+    is_hip,
+    logger,
+    print_warning_once,
+)
 
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and is_hip()
 
@@ -322,10 +328,18 @@ def _prepare_ple_batch(
         query_start_loc = torch.cat(
             [lengths.new_zeros(1), torch.cumsum(lengths, dim=0)]
         )
-        if mode in (
-            ForwardMode.EXTEND,
-            ForwardMode.MIXED,
-            ForwardMode.SPLIT_PREFILL,
+        # The packed kernels read x through query_start_loc with no bounds
+        # checks, so the host lengths must cover exactly the processed rows.
+        # Both sides are host integers: the check costs no device sync.
+        if (
+            mode
+            in (
+                ForwardMode.EXTEND,
+                ForwardMode.MIXED,
+                ForwardMode.SPLIT_PREFILL,
+            )
+            and extend_seq_lens_cpu is not None
+            and sum(extend_seq_lens_cpu) == processed_tokens
         ):
             packed_query_start_loc = query_start_loc
         sequence_count = lengths.shape[0]
@@ -521,22 +535,28 @@ def _use_qwen4_varlen_prefill(
     dilation: int,
 ) -> bool:
     if (
-        not envs.SGLANG_ENABLE_QWEN4_PLE_FUSION.get()
-        or not is_cuda()
-        or mode
+        mode
         not in (
             ForwardMode.EXTEND,
             ForwardMode.MIXED,
             ForwardMode.SPLIT_PREFILL,
         )
-        or query_start_loc is None
+        or not is_cuda()
     ):
+        return False
+    if not envs.SGLANG_ENABLE_QWEN4_PLE_FUSION.get():
+        _warn_padded_ple_prefill("SGLANG_ENABLE_QWEN4_PLE_FUSION is off")
+        return False
+    if query_start_loc is None:
+        _warn_padded_ple_prefill(
+            "the host extend lengths do not cover the processed tokens"
+        )
         return False
     from sglang.kernels.ops.mamba.qwen4_short_conv import (
         can_fuse_qwen4_varlen_conv,
     )
 
-    return can_fuse_qwen4_varlen_conv(
+    if can_fuse_qwen4_varlen_conv(
         x,
         weight,
         state,
@@ -545,6 +565,31 @@ def _use_qwen4_varlen_prefill(
         req_indices,
         token_offsets,
         dilation,
+    ):
+        return True
+    _warn_padded_ple_prefill(
+        "unsupported inputs: "
+        f"x {x.dtype} {x.device.type} contiguous={x.is_contiguous()}, "
+        f"weight {weight.dtype} {tuple(weight.shape)} "
+        f"contiguous={weight.is_contiguous()}, "
+        f"state {state.dtype} {tuple(state.shape[1:])} "
+        f"contiguous={state.is_contiguous()}, dilation {dilation}, "
+        f"state_indices {state_indices.dtype}, "
+        f"query_start_loc {query_start_loc.dtype}, "
+        f"req_indices {req_indices.dtype}, token_offsets {token_offsets.dtype}"
+    )
+    return False
+
+
+def _warn_padded_ple_prefill(reason: str) -> None:
+    # The padded short conv holds three [requests, longest request, channels]
+    # tensors at once, so one long request beside short ones costs gigabytes
+    # the packed path does not need. The reason carries no per-batch sizes, so
+    # each distinct cause warns once.
+    print_warning_once(
+        f"Qwen4 PLE prefill falls back to the padded short conv ({reason}); "
+        "its activations scale with requests x longest request x channels "
+        "instead of tokens x channels"
     )
 
 
@@ -1469,6 +1514,10 @@ class Qwen4ExpPLELayer(nn.Module):
                 gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
                 gate = torch.sigmoid(gate)
                 gated_value = gate * value.unsqueeze(-2)
+        # Only gated_value feeds what follows. Releasing the gate inputs here
+        # (three [tokens, channels] and two [tokens, hidden] tensors) keeps
+        # them out of the conv's peak.
+        del embeddings, key, value, key_normed, query_normed
         gated_value_normed = self._apply_ple_norm(self.norm_conv, gated_value)
         gated_value = gated_value.flatten(-2)
         gated_value_normed = gated_value_normed.flatten(-2)
@@ -1499,7 +1548,10 @@ class Qwen4ExpPLELayer(nn.Module):
             batch,
         )
         output = gated_value + conv_output
-        if not batch.use_decode_fast_path:
+        del gated_value, gated_value_normed, conv_output
+        # A packed layout (query_start_loc set) covers exactly the processed
+        # tokens, so every token is valid and the mask would copy output as is.
+        if not batch.use_decode_fast_path and batch.query_start_loc is None:
             output = torch.where(
                 batch.valid_tokens.unsqueeze(-1),
                 output,
