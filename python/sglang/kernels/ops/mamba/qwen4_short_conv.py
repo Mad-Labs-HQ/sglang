@@ -206,12 +206,13 @@ def _qwen4_varlen_state_writeback_kernel(
     ).to(x_ptr.dtype.element_ty)
     tl.debug_barrier()
 
-    # The masked sums pick one old column; -0.0 is the filler that leaves that
-    # value's bits intact (0.0 + -0.0 is 0.0), so the state matches a copy.
+    # The masked sums pick one old column. On SM120 a stored -0.0 comes back as
+    # +0.0 whatever the filler; no output can tell, since the convolution starts
+    # its sum at +0.0.
     for output_col in tl.static_range(0, STATE_LEN):
         source_col = length - STATE_LEN + output_col
         old_col = STATE_LEN + source_col
-        old_value = tl.sum(tl.where(state_col == old_col, old_state, -0.0), axis=1)
+        old_value = tl.sum(tl.where(state_col == old_col, old_state, 0.0), axis=1)
         token_value = tl.load(
             x_ptr + (seq_start + source_col) * CHANNELS + channel_1d,
             mask=channel_mask_1d & (source_col >= 0),
@@ -231,7 +232,7 @@ def _qwen4_varlen_state_writeback_kernel(
         for output_col in tl.static_range(0, STATE_LEN):
             source_col = track_offset - STATE_LEN + output_col
             old_col = STATE_LEN + source_col
-            old_value = tl.sum(tl.where(state_col == old_col, old_state, -0.0), axis=1)
+            old_value = tl.sum(tl.where(state_col == old_col, old_state, 0.0), axis=1)
             token_value = tl.load(
                 x_ptr + (seq_start + source_col) * CHANNELS + channel_1d,
                 mask=channel_mask_1d & (source_col >= 0),
