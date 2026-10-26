@@ -22,13 +22,26 @@ if TYPE_CHECKING:
 _MASK32 = 0xFFFFFFFF
 _UINT32_SCALE = float(1 << 32)
 
+# The server's API keys reach the same places as the watermark secrets: the
+# startup log line, /server_info and the launch command all carry server args.
+_SECRET_FIELDS = frozenset(
+    {
+        "watermark_key",
+        "watermark_key_b",
+        "watermark_config",
+        "api_key",
+        "admin_api_key",
+    }
+)
+_SECRET_FLAGS = ("--watermark-config", "--api-key", "--admin-api-key")
+
 
 def redact_watermark_secrets(value: Any, *, in_watermark_config: bool = False) -> Any:
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         result = copy.copy(value)
         for field in dataclasses.fields(value):
             item = getattr(value, field.name)
-            if field.name in {"watermark_key", "watermark_key_b", "watermark_config"}:
+            if field.name in _SECRET_FIELDS:
                 object.__setattr__(
                     result,
                     field.name,
@@ -64,7 +77,7 @@ def redact_watermark_secrets(value: Any, *, in_watermark_config: bool = False) -
         replacements = {}
         for field in msgspec.structs.fields(value):
             item = getattr(value, field.name)
-            if field.name in {"watermark_key", "watermark_key_b", "watermark_config"}:
+            if field.name in _SECRET_FIELDS:
                 replacements[field.name] = "<redacted>" if item is not None else None
             elif field.name in {
                 "watermark",
@@ -81,7 +94,7 @@ def redact_watermark_secrets(value: Any, *, in_watermark_config: bool = False) -
         return {
             key: (
                 "<redacted>"
-                if key in {"watermark_key", "watermark_key_b", "watermark_config"}
+                if key in _SECRET_FIELDS
                 or (in_watermark_config and key in {"key", "key_b"})
                 else redact_watermark_secrets(
                     item,
@@ -120,11 +133,11 @@ def redact_watermark_command_line(
             and argument.split("=", 1)[1] == watermark_config
         ):
             result.append(f"{argument.split('=', 1)[0]}=<redacted>")
-        elif argument == "--watermark-config":
+        elif argument in _SECRET_FLAGS:
             result.append(argument)
             redact_next = True
-        elif argument.startswith("--watermark-config="):
-            result.append("--watermark-config=<redacted>")
+        elif "=" in argument and argument.split("=", 1)[0] in _SECRET_FLAGS:
+            result.append(f"{argument.split('=', 1)[0]}=<redacted>")
         else:
             result.append(argument)
     return " ".join(result)
