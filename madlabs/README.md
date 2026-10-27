@@ -10,8 +10,7 @@ The fork's default branch `main` is a plain copy of upstream at `67bb6a58d0`
 names below, never from `main`.
 
 Where a source below is in **mad-llm-deploy** (our private deployment repo),
-the path is at commit `0c63afe` on its branch
-`feat/mad-llm-1-main-922810a5ed`, the release record of `922810a5ed`, unless it
+the path is at commit `0c63afe`, the release record of `922810a5ed`, unless it
 says `main`. "CHANGELOG" means mad-llm-deploy `deploy/CHANGELOG.md`, and
 "engine doc" means mad-llm-deploy `docs/design/mad-llm-engine.md`.
 
@@ -22,8 +21,9 @@ says `main`. "CHANGELOG" means mad-llm-deploy `deploy/CHANGELOG.md`, and
 | 2026-09-25 | Andrew Stanton's System One line on upstream `67bb6a58d0`, 29 commits up to `f9bfb5802d` | `git log 67bb6a58d0..f9bfb5802d` |
 | 2026-10-02 | The owner makes that line the trunk and asks for it to move onto current upstream | engine doc:265-267 |
 | 2026-10-18 | Rebased onto `fe89a7c890` as `f132f9b522`; 1,440 upstream commits newer than `67bb6a58d0` | `git rev-list --count 67bb6a58d0..fe89a7c890` |
-| 2026-10-21 | The prefill out-of-memory fix, `142800d641`..`3a12b433f9` | CHANGELOG:16-28 |
-| 2026-10-26 | `b1834f39fc` merges the old madlabs/main (`f9bfb5802d`) without taking its code, so madlabs/main moves here by fast-forward; then `922810a5ed` | `git show b1834f39fc` |
+| 2026-10-21 | The prefill out-of-memory fix, `142800d641` through `3a12b433f9`, committed to this line | `git log --format=%cd`; CHANGELOG:16-28 |
+| 2026-10-26 | `b1834f39fc` merges the old madlabs/main (`f9bfb5802d`) without taking its code, so madlabs/main can move here by fast-forward; then `922810a5ed` | `git show b1834f39fc` |
+| 2026-10-27 01:16 UTC | madlabs/main moves from `f9bfb5802d` to `922810a5ed` by fast-forward | the fork's activity log |
 | 2026-10-27 | `922810a5ed` serves production | CHANGELOG:11-13, 47 |
 
 ## What we carry
@@ -63,9 +63,10 @@ unless it is a fast-forward. Never force-push it. Nothing enforces this yet:
 the fork has no branch protection or rulesets.
 
 A rebase onto newer upstream rewrites every commit, so it cannot reach
-madlabs/main by fast-forward. It lands the way the 2026-10-26 move did: the
-rebased line merges the old madlabs/main with `-s ours`, which records the old
-tip as an ancestor and keeps the rebased tree unchanged.
+madlabs/main by fast-forward. It lands the way the 2026-10-26 merge did
+(pushed to madlabs/main 2026-10-27 01:16 UTC): the rebased line merges the old
+madlabs/main with `-s ours`, which records the old tip as an ancestor and keeps
+the rebased tree unchanged.
 
 ### The 2026-10-26 merge, `b1834f39fc`
 
@@ -85,8 +86,9 @@ newer upstream, and two replaced on purpose". Checked with `git cherry -v
 - **2 replaced on purpose**:
   - `d046751e28`, a flat 4-slot Mamba reservation, is retired by
     `bb6d7c2e53` plus `452e0447be` (that commit's message says so).
-  - `c8333cb8fa`, the reader re-pin to `+systemone2`, was carried as
-    `5a213706ea` ("cherry picked from c8333cb8fa").
+  - `c8333cb8fa`, the reader re-pin to `+systemone2`, was redone as
+    `5a213706ea`: a cherry-pick re-pinned to `84f09ea980` and `+systemone3`
+    for the `f6fcda8827` tree, not for this one (see the Correction below).
 
 **Correction.** The merge message says `c8333cb8fa` was replaced by "the NVMe
 PLE reader re-pinned for this tree as systemone3". That is false. `5a213706ea`
@@ -241,6 +243,14 @@ branch can fast-forward onto this line once items 1-4 below are done.
      `tools/ple_nvme/README.md` "Source guard": review the adapter against
      the 7 modules, refresh the guard, bump to `+systemone4` (and
      `Cargo.lock`), and smoke-test NVMe mode on a GPU box.
+   - Before the `+systemone4` bump, compare `ssd_stream/Cargo.lock` with the
+     crate versions in Andrew's built reader. The committed lock is the SSD
+     Stream v0.2.0 release lock (`3c8fe2e97b`), not a record of his build.
+     Until that commit the repo had no lock for the reader (`.gitignore`:232
+     on madlabs/main ignores `Cargo.lock`), so a build's crate versions were
+     whatever cargo resolved on that box when it ran.
+     `3c8fe2e97b`'s message says the crate set `cargo generate-lockfile`
+     picked "was never built with this code"; nothing records that.
    - Check the out-of-memory fix too. The `3a12b433f9` line changed the code
      the reader subclasses and calls (`qwen4.py:32` subclasses
      `Qwen4ExpPLELayer`), and nobody has run the decision-burst memory gate
@@ -251,7 +261,8 @@ branch can fast-forward onto this line once items 1-4 below are done.
 2. **Pennyroyal's two NIXL bounce-buffer fixes are not carried.**
    `e1a1572743` ("align mixed-state NIXL bounce I/O") and `067c639c0a`
    ("bound NIXL hybrid bounce transfers", upstream #36524, open) are only on
-   `madlabs/pennyroyal-v2.5.0`. Neither madlabs/main nor
+   `madlabs/pennyroyal-v2.5.0` and the spike branch
+   `spike/mamba-cache-trace-pennyroyal`. Neither madlabs/main nor
    `madlabs/systemone-prod` has them (`git branch -r --contains`). The engine
    doc lists them as "under decision" (:219). Andrew's disk tier needs them if
    any of its pools goes through the staging path; his engine's startup log
