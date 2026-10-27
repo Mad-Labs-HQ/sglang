@@ -70,10 +70,13 @@ SHA as well.
 
 The reader registers its hooks only when every SGLang module listed in
 `ssd_stream/src/sglang_ssd_stream/pennyroyal-source.json` is byte-identical to
-the copy the adapter was reviewed against. That copy is currently
-`madlabs/main@84f09ea980` (madlabs/main rebased onto upstream f6fcda8827).
-If a rebase changes one of those modules, NVMe startup and
-`tests/test_source_guard.py` fail, and nothing runs unguarded. To accept the new code:
+the copy the adapter was reviewed against, `madlabs/main@84f09ea980`. That
+commit is on madlabs/main-next (upstream f6fcda8827), not in madlabs/main's
+history, and 7 of the 11 modules differ on madlabs/main (upstream base
+fe89a7c890). So NVMe startup and `tests/test_source_guard.py` fail on
+madlabs/main until the guard is refreshed (`madlabs/README.md`, "Open items").
+Any later change to one of those modules fails them the same way, and nothing
+runs unguarded. To accept the new code:
 
 1. Review `qwen4.py`, `graph.py`, `config.py`, `offload.py` and `backend.py`
    against the changed modules.
