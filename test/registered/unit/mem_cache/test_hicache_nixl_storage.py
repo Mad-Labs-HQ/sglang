@@ -4,6 +4,7 @@ from sglang.test.ci.ci_register import register_cuda_ci
 
 register_cuda_ci(est_time=16, stage="base-b", runner_config="1-gpu-small")
 
+import gc
 import os
 import shutil
 import socket
@@ -336,6 +337,25 @@ class TestNixlUnified(CustomTestCase):
             )
         except ImportError:
             self.skipTest("NIXL not available, skipping NIXL storage tests")
+        # Cleanups run last in first out, so this one runs after every cleanup
+        # a test adds (a test may still close self.hicache or destroy a host
+        # pool that is registered with it).
+        self.addCleanup(self._release_hicache)
+
+    def _release_hicache(self):
+        """Close this test's storage object and free its NIXL agent now, on
+        this thread, before the next test builds its own.
+
+        close() stops the L3 cleaner thread and deregisters the host memory.
+        Dropping the last reference frees the object. The agent can outlive it
+        in a reference cycle: a spy restored as an instance attribute (agent ->
+        bound method -> agent). Only the cycle collector frees that, so it runs
+        here instead of during a later test.
+        """
+        hicache, self.hicache = self.hicache, None
+        hicache.close()
+        del hicache
+        gc.collect()
 
     def tearDown(self):
         """Clean up test directories."""
@@ -559,9 +579,11 @@ class TestNixlUnified(CustomTestCase):
             },
         )
         try:
-            return HiCacheNixl(storage_config=obj_config, file_path="")
+            hicache = HiCacheNixl(storage_config=obj_config, file_path="")
         except Exception as e:
             self.skipTest(f"NIXL OBJ backend unavailable: {e}")
+        self.addCleanup(hicache.close)
+        return hicache
 
     @unittest.skipUnless(
         MinioFixture.is_available(), "minio binary or boto3 not available"
@@ -819,9 +841,12 @@ class TestNixlUnified(CustomTestCase):
     def test_batch_get_v2_uses_bounce_buffer_for_non_zero_copy_pool(self):
         pool = MockHybridPool(expose_zero_copy=False)
         self.hicache.register_mem_host_pool_v2(pool, PoolName.MAMBA)
+        # Look the context up here, not inside the fake: a fake that reads
+        # self.hicache is stored on self.hicache, a test -> storage -> fake ->
+        # test cycle that kept this storage object and its agent alive.
+        ctx = self.hicache._hybrid_pool_ctx[PoolName.MAMBA]
 
         def fake_batch_xfer(keys, key_strs, host_buffers, direction):
-            ctx = self.hicache._hybrid_pool_ctx[PoolName.MAMBA]
             ctx.bounce_get[0].fill_(3)
             return [True] * len(key_strs)
 
@@ -942,9 +967,14 @@ class TestNixlDirectIO(CustomTestCase):
             # use_direct_io defaults to True (env var)
         )
         try:
-            return HiCacheNixl(storage_config=storage_config, file_path=self.test_dir)
+            hicache = HiCacheNixl(
+                storage_config=storage_config, file_path=self.test_dir
+            )
         except ImportError:
             self.skipTest("NIXL not available")
+        # Close at the end of the test, not whenever the object is collected.
+        self.addCleanup(hicache.close)
+        return hicache
 
     def test_needs_page_alignment_true_for_file_backend(self):
         """File-based backend + use_direct_io=True must set needs_page_alignment."""
@@ -988,6 +1018,7 @@ class TestNixlDirectIO(CustomTestCase):
             )
         except ImportError:
             self.skipTest("NIXL not available")
+        self.addCleanup(hicache.close)
         self.assertFalse(hicache.needs_page_alignment)
         self.assertFalse(hicache.file_manager.use_direct_io)
 
