@@ -81,6 +81,9 @@ PYTHON_ONLY_REQUEST_FIELDS = frozenset(
         "routing_key",
         "sampling_logprobs_mode",
         "session_id",
+        # Python front end only: the Rust server does not send it, so its
+        # requests decode as False (io_struct.TokenizedGenerateReqInput).
+        "skip_cache_insert",
         "token_indices_to_pool",
         "use_audio_in_video",
         "video_config",

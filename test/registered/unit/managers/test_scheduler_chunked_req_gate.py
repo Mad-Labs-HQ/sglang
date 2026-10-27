@@ -139,8 +139,10 @@ class TestStashGatePreservesPrefix(CustomTestCase):
         )
 
         self.assertEqual(req.prefix_len, self.POST_RESET_FILL_LEN)
+        # stash_chunked_request checkpoints with chunked=True: a chunk's
+        # checkpoint counts no cache hit (mem_cache/common.py checkpoint_kv_cache).
         s.tree_cache.checkpoint.assert_called_once_with(
-            req, up_to=self.POST_RESET_FILL_LEN
+            req, up_to=self.POST_RESET_FILL_LEN, chunked=True
         )
 
     def test_no_chunked_req_never_mutates_state(self):

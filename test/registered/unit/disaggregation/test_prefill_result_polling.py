@@ -1266,9 +1266,9 @@ class TestPrefillResultPolling(CustomTestCase):
                             req.inflight_middle_chunks += 1
                         return super().run_batch(batch)
 
-                    def checkpoint_disagg_prefill(self, req):
+                    def checkpoint_disagg_prefill(self, req, *, chunked=False):
                         checkpoint_ends.append(req.extend_end)
-                        super().checkpoint_disagg_prefill(req)
+                        super().checkpoint_disagg_prefill(req, chunked=chunked)
 
                 if pause_at == 1:
                     arrivals = [batches[0], None, None, batches[1], batches[2]]
