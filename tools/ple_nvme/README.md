@@ -31,10 +31,12 @@ CARGO_BUILD_JOBS=2 PYTHON="$PWD/.venv/bin/python" bash tools/ple_nvme/install.sh
 
 `install.sh` needs Rust/Cargo and uv. It builds the reader (a PyO3 extension
 with an io_uring page reader) into `.ple-nvme/`, a separate import directory,
-and does not touch the Python environment. Set `PENNY_PLE_PLUGIN_DIR` to pick
-another directory. The installer will not overwrite an existing one. The
-overlay format is engine-independent: an overlay made for Pennyroyal v2.5.0
-works here unchanged.
+and does not touch the Python environment. `ssd_stream/Cargo.lock` pins the
+Rust dependencies to the SSD Stream v0.2.0 release's lock; set
+`MATURIN_PEP517_ARGS=--locked` to make the build refuse any other versions.
+Set `PENNY_PLE_PLUGIN_DIR` to pick another directory. The installer will not
+overwrite an existing one. The overlay format is engine-independent: an
+overlay made for Pennyroyal v2.5.0 works here unchanged.
 
 ## Launch
 
@@ -82,7 +84,9 @@ runs unguarded. To accept the new code:
    against the changed modules.
 2. Run `python tools/ple_nvme/refresh_source_guard.py --source madlabs/main@<sha>`.
 3. Bump the `+systemoneN` version in `pyproject.toml`, `Cargo.toml`,
-   `__init__.py`, `check_ple_nvme.py` and `tests/test_pennyroyal.py`.
+   `__init__.py`, `check_ple_nvme.py` and `tests/test_pennyroyal.py`, then run
+   `cargo update --workspace` in `ssd_stream/` so `Cargo.lock` records the new
+   version (a `--locked` build refuses a lock that does not match `Cargo.toml`).
 4. Reinstall into a fresh `PENNY_PLE_PLUGIN_DIR`.
 
 ## Tests

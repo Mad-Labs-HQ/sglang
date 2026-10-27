@@ -232,6 +232,7 @@ work_dirs/
 Cargo.lock
 !rust/Cargo.lock
 !rust/sglang-radix-tree/Cargo.lock
+!tools/ple_nvme/ssd_stream/Cargo.lock
 !experimental/sgl-router/Cargo.lock
 
 # Other repos
