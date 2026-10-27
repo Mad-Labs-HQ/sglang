@@ -1,0 +1,178 @@
+name: madlabs CPU
+# The fork's own CPU check. Upstream's pipelines (pr-test.yml and the rest) are
+# built for upstream's self-hosted runners and never fire on a push to a
+# madlabs/ branch. This workflow runs, on a GitHub-hosted runner:
+#   cpu-unit  the CPU-registered test files the fork adds or changes, plus the
+#             four upstream CPU tests the fork's changes broke and this branch
+#             fixed, one process per file as upstream's run_suite.py does;
+#   ple-nvme  the NVMe PLE reader: built with its committed Cargo.lock, then
+#             its tests. The source-guard step fails until the reader's guard
+#             is refreshed for this tree (madlabs/README.md, "Open items").
+# GitHub Actions is turned off on Mad-Labs-HQ/sglang, so nothing runs until an
+# owner turns it on. Turning it on also arms upstream's workflows that fire on
+# every pull request; see madlabs/README.md, "How it is tested".
+
+on:
+  push:
+    branches: [madlabs/main]
+  pull_request:
+    branches: [madlabs/main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: madlabs-cpu-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # One file per line. 34 are the base-a-test-cpu files the fork adds or
+      # changes on fe89a7c890..922810a5ed; test_parity, test_prefill_result_polling,
+      # test_scheduler_chunked_req_gate and test_server_args_docs_coverage are
+      # the upstream tests the fork's changes broke.
+      CPU_TEST_FILES: |
+        test/registered/unit/api/v1/test_parity.py
+        test/registered/unit/constrained/test_xgrammar_backend.py
+        test/registered/unit/disaggregation/test_encode_server.py
+        test/registered/unit/disaggregation/test_prefill_result_polling.py
+        test/registered/unit/entrypoints/openai/test_serving_chat.py
+        test/registered/unit/entrypoints/openai/test_serving_completions.py
+        test/registered/unit/entrypoints/openai/test_serving_decisions.py
+        test/registered/unit/entrypoints/openai/test_serving_responses.py
+        test/registered/unit/entrypoints/systemone/test_calibration.py
+        test/registered/unit/entrypoints/systemone/test_joint_schema.py
+        test/registered/unit/entrypoints/test_custom_warmup.py
+        test/registered/unit/entrypoints/test_server_secret_redaction.py
+        test/registered/unit/function_call/test_function_call_parser.py
+        test/registered/unit/function_call/test_qwen3_coder_detector.py
+        test/registered/unit/layers/quantization/test_sm120_online_fp8.py
+        test/registered/unit/layers/test_hyperconnection_online_fp8.py
+        test/registered/unit/managers/test_batch_result_processor_logprobs.py
+        test/registered/unit/managers/test_mm_process_config.py
+        test/registered/unit/managers/test_scheduler_chunked_req_gate.py
+        test/registered/unit/mem_cache/test_hicache_nixl_cleaner.py
+        test/registered/unit/mem_cache/test_hybrid_pool_assembler.py
+        test/registered/unit/mem_cache/test_mamba_donated_alloc_ratio.py
+        test/registered/unit/mem_cache/test_mamba_host_restore_admission.py
+        test/registered/unit/mem_cache/test_mamba_live_admission.py
+        test/registered/unit/mem_cache/test_mooncake_group_semantics.py
+        test/registered/unit/mem_cache/test_mooncake_ssd_offload_path.py
+        test/registered/unit/mem_cache/test_skip_cache_insert.py
+        test/registered/unit/mem_cache/test_streaming_session_unit.py
+        test/registered/unit/model_executor/test_prefill_cuda_graph_runner_helpers.py
+        test/registered/unit/models/test_qwen4_exp_ple_prefill.py
+        test/registered/unit/models/test_qwen4_loader_lifetime.py
+        test/registered/unit/models/test_qwen4_online_fp8.py
+        test/registered/unit/multimodal/test_base_processor_image_decode.py
+        test/registered/unit/multimodal/test_processor_device_selection.py
+        test/registered/unit/sampling/test_sampler_tp_sync.py
+        test/registered/unit/server_args/test_server_args.py
+        test/registered/unit/server_args/test_server_args_docs_coverage.py
+        test/registered/unit/spec/test_online_fp8_lm_head_sharing.py
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v5
+
+      # The sglang wheel builds the native gRPC extension with setuptools-rust;
+      # same install as upstream's .github/workflows/_pr-test-stage-cpu.yml.
+      - name: Install protoc + Rust toolchain
+        run: bash scripts/ci/utils/install_rust_protoc.sh
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          shared-key: madlabs-sglang-rust
+
+      - name: Install sglang
+        env:
+          UV_SYSTEM_PYTHON: "1"
+        run: uv pip install -e "python[dev]" --index-strategy unsafe-best-match --prerelease allow
+
+      - name: CPU unit tests
+        run: |
+          failed=()
+          for f in $CPU_TEST_FILES; do
+            echo "::group::$f"
+            python3 -m pytest -q -p no:cacheprovider "$f" || failed+=("$f")
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            printf 'FAILED %s\n' "${failed[@]}"
+            exit 1
+          fi
+
+  ple-nvme:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      READER_TESTS: tools/ple_nvme/tests tools/ple_nvme/ssd_stream/tests
+      # Test names, matched with -k: pytest's node ids for these two
+      # directories are not repo-relative, so --deselect cannot name them.
+      # Each reads the reader's source guard against this tree and passes only
+      # while every guarded module matches pennyroyal-source.json:
+      # tests/test_source_guard.py, two in tests/test_prepare_ple_nvme.py and
+      # two (one parametrized over six hooks) in ssd_stream/tests/test_pennyroyal.py.
+      GUARD_TESTS: >-
+        test_source_guard_matches_every_hooked_publication_module
+        test_preflight_accepts_exact_preparer_output
+        test_preflight_accepts_source_bound_optional_quant_config
+        test_each_required_hook_application_failure_is_fatal
+        test_required_hook_enforcement_is_idempotent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install protoc + Rust toolchain
+        run: bash scripts/ci/utils/install_rust_protoc.sh
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          shared-key: madlabs-sglang-rust
+
+      - name: Install sglang
+        env:
+          UV_SYSTEM_PYTHON: "1"
+        run: uv pip install -e "python[dev]" --index-strategy unsafe-best-match --prerelease allow
+
+      # The reader's own installer, into .ple-nvme/. --locked makes the build
+      # fail when Cargo.lock no longer matches Cargo.toml.
+      - name: Build the NVMe PLE reader
+        env:
+          MATURIN_PEP517_ARGS: --locked
+          UV_SYSTEM_PYTHON: "1"
+        run: PYTHON="$(command -v python3)" bash tools/ple_nvme/install.sh
+
+      - name: Reader tests
+        run: |
+          read -ra names <<< "$GUARD_TESTS"
+          read -ra dirs <<< "$READER_TESTS"
+          expr="not ${names[0]}$(printf ' and not %s' "${names[@]:1}")"
+          PYTHONPATH="$PWD/.ple-nvme" python3 -m pytest -q -p no:cacheprovider \
+            "${dirs[@]}" -k "$expr"
+
+      # Fails until the guard is refreshed for this tree; pytest also fails
+      # (exit 5) if no test matches, so the guard cannot drop out unnoticed.
+      - name: Source guard
+        if: ${{ !cancelled() }}
+        run: |
+          read -ra names <<< "$GUARD_TESTS"
+          read -ra dirs <<< "$READER_TESTS"
+          expr="${names[0]}$(printf ' or %s' "${names[@]:1}")"
+          PYTHONPATH="$PWD/.ple-nvme" python3 -m pytest -q -p no:cacheprovider \
+            "${dirs[@]}" -k "$expr"
