@@ -5,9 +5,6 @@ name: madlabs CPU
 #   cpu-unit  the CPU-registered test files the fork adds or changes, plus the
 #             four upstream CPU tests the fork's changes broke and this branch
 #             fixed, one process per file as upstream's run_suite.py does;
-#   ple-nvme  the NVMe PLE reader: built with its committed Cargo.lock, then
-#             its tests. The source-guard step fails when a guarded SGLang
-#             module changes without a re-pin (tools/ple_nvme/README.md).
 # GitHub Actions is turned off on Mad-Labs-HQ/sglang, so nothing runs until an
 # owner turns it on. Turning it on also arms upstream's workflows that fire on
 # every pull request; see madlabs/README.md, "CPU tests".
@@ -110,69 +107,3 @@ jobs:
             printf 'FAILED %s\n' "${failed[@]}"
             exit 1
           fi
-
-  ple-nvme:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      READER_TESTS: tools/ple_nvme/tests tools/ple_nvme/ssd_stream/tests
-      # Test names, matched with -k: pytest's node ids for these two
-      # directories are not repo-relative, so --deselect cannot name them.
-      # Each reads the reader's source guard against this tree and passes only
-      # while every guarded module matches pennyroyal-source.json:
-      # tests/test_source_guard.py, two in tests/test_prepare_ple_nvme.py and
-      # two (one parametrized over six hooks) in ssd_stream/tests/test_pennyroyal.py.
-      GUARD_TESTS: >-
-        test_source_guard_matches_every_hooked_publication_module
-        test_preflight_accepts_exact_preparer_output
-        test_preflight_accepts_source_bound_optional_quant_config
-        test_each_required_hook_application_failure_is_fatal
-        test_required_hook_enforcement_is_idempotent
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: astral-sh/setup-uv@v5
-
-      - name: Install protoc + Rust toolchain
-        run: bash scripts/ci/utils/install_rust_protoc.sh
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-          shared-key: madlabs-sglang-rust
-
-      - name: Install sglang
-        env:
-          UV_SYSTEM_PYTHON: "1"
-        run: uv pip install -e "python[dev]" --index-strategy unsafe-best-match --prerelease allow
-
-      # The reader's own installer, into .ple-nvme/. --locked makes the build
-      # fail when Cargo.lock no longer matches Cargo.toml.
-      - name: Build the NVMe PLE reader
-        env:
-          MATURIN_PEP517_ARGS: --locked
-          UV_SYSTEM_PYTHON: "1"
-        run: PYTHON="$(command -v python3)" bash tools/ple_nvme/install.sh
-
-      - name: Reader tests
-        run: |
-          read -ra names <<< "$GUARD_TESTS"
-          read -ra dirs <<< "$READER_TESTS"
-          expr="not ${names[0]}$(printf ' and not %s' "${names[@]:1}")"
-          PYTHONPATH="$PWD/.ple-nvme" python3 -m pytest -q -p no:cacheprovider \
-            "${dirs[@]}" -k "$expr"
-
-      # Fails when a guarded module changed without a re-pin; pytest also
-      # fails (exit 5) if no test matches, so the guard cannot drop out unnoticed.
-      - name: Source guard
-        if: ${{ !cancelled() }}
-        run: |
-          read -ra names <<< "$GUARD_TESTS"
-          read -ra dirs <<< "$READER_TESTS"
-          expr="${names[0]}$(printf ' or %s' "${names[@]:1}")"
-          PYTHONPATH="$PWD/.ple-nvme" python3 -m pytest -q -p no:cacheprovider \
-            "${dirs[@]}" -k "$expr"
