@@ -217,16 +217,16 @@ doc:271-274).
 The rule: every production deployment runs the same engine line, so the
 deployments never drift apart (owner decision, 2026-10-04; engine doc:23-27).
 
-It is **not met** today:
+It is **met**: mad-llm-1 is the only production deployment, and it runs
+`922810a5ed` (tag `prod/2026-10-27`) from madlabs/main. Andrew's box is a dev
+machine, not a production deployment (owner, 2026-10-28): it is the only box
+that runs a NIXL disk tier and the NVMe PLE reader.
 
-- **Ours:** `922810a5ed` on madlabs/main.
-- **Andrew's:** his branch `madlabs/systemone-prod` is at `f9bfb5802d`, on
-  upstream `67bb6a58d0`, 1,440 upstream commits older than this line's base.
-  Which commit his box serves is not recorded in mad-llm-deploy: his box has
-  no declaration there (engine doc:31).
-
-`f9bfb5802d` is an ancestor of madlabs/main (through `b1834f39fc`), so his
-branch can fast-forward onto this line once items 1-4 below are done.
+**`madlabs/main-nixl`** is Andrew's dev line: madlabs/main plus Pennyroyal's
+two NIXL bounce-buffer fixes (item 2). Only Andrew deploys it, and he
+qualifies it on his machine. It stays a superset of madlabs/main: whoever
+moves madlabs/main merges it into `madlabs/main-nixl` the same day, and Andrew
+may merge madlabs/main into it whenever he needs.
 
 ## Open items
 
@@ -274,30 +274,24 @@ branch can fast-forward onto this line once items 1-4 below are done.
    - mad-llm-deploy also has no launcher for this line in NVMe mode:
      `deploy/configs-trunk/serve-flash-next-madllm.sh:98-99` refuses anything
      but `PENNY_PLE_BACKEND=ram`.
-2. **Pennyroyal's two NIXL bounce-buffer fixes are not carried.**
-   `e1a1572743` ("align mixed-state NIXL bounce I/O") and `067c639c0a`
-   ("bound NIXL hybrid bounce transfers", upstream #36524, open) are only on
-   `madlabs/pennyroyal-v2.5.0` and the spike branch
-   `spike/mamba-cache-trace-pennyroyal`. Neither madlabs/main nor
-   `madlabs/systemone-prod` has them (`git branch -r --contains`). The engine
-   doc lists them as "under decision" (:219). Andrew's disk tier needs them if
-   any of its pools goes through the staging path; his engine's startup log
-   shows which (`registered hybrid host pool ... zero_copy=`).
-3. **Qualify in Andrew's shape**, with the NIXL disk tier and the NVMe reader.
-   Run `test/registered/unit/mem_cache/test_hicache_nixl_storage.py` whole,
-   in one process, on the qualification box. Its tests now close their NIXL
-   agents at teardown. On a Linux CPU container with the NIXL 1.4.0 wheel, the
-   live agents left after the file fell from 4 to 0. Whether that also ends
-   the crash seen on the GPU box is not yet known.
-4. **Give his box a declaration** in mad-llm-deploy with `production = true`,
-   so the CHANGELOG and its test cover it (engine doc:48-49).
-5. **Record Andrew's engines.** His branch `madlabs/systemone-prod` moved to
-   `408fdd19ec` on 2026-09-27, `b343ebc8a4` on 10-02 and `f9bfb5802d` on 10-25
-   (the fork's activity log). Which of them his box served is not recorded:
-   there is no CHANGELOG entry and no proposed tag. They are reachable from
-   that branch and, from madlabs/main, only through `b1834f39fc`.
-6. **Owner settings, not files:**
-   - tags for the engines above;
+2. **Pennyroyal's two NIXL bounce-buffer fixes are carried on
+   `madlabs/main-nixl`, not on madlabs/main** (owner, 2026-10-28: NIXL runs
+   only on Andrew's dev machine). They are `72a1f20499` (port of
+   `067c639c0a`, "bound NIXL hybrid bounce transfers", the same patch as
+   upstream #36524, open) and `d42b47dfe2` (port of `e1a1572743`, "align
+   mixed-state NIXL bounce I/O"), both authored by John Pezzulli.
+3. **Andrew qualifies `madlabs/main-nixl` on his dev machine** when he can,
+   with the NIXL disk tier and the NVMe reader: item 1's GPU checks, and
+   `test/registered/unit/mem_cache/test_hicache_nixl_storage.py` whole, in one
+   process. Its tests now close their NIXL agents at teardown; on a Linux CPU
+   container with the NIXL 1.4.0 wheel, the live agents left after the file
+   fell from 4 to 0. Whether that also ends the crash seen on the GPU box is
+   not yet known.
+4. **mad-llm-deploy has an NVMe-mode serve config on a parked branch,**
+   `feat/trunk-nvme-ple`, for the day Andrew's box is declared there. Its
+   RAM launch is byte-identical to mad-llm-1's.
+5. **Owner settings, not files:**
+   - tags: done 2026-10-27 (`prod/*`, and `archive/*` for removed branches);
    - a ruleset that blocks force-push and deletion of `madlabs/main`,
      `madlabs/pennyroyal-v2.5.0` and `madlabs/v0.5.19-prod`;
    - making madlabs/main the default branch.
