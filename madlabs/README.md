@@ -1,13 +1,19 @@
 # Mad Labs SGLang trunk: madlabs/main
 
 Branch `madlabs/main` is upstream sgl-project/sglang at **`fe89a7c890`**
-(2026-10-18) plus 55 first-parent commits, one of them a merge
-(`b1834f39fc`) that brings in no code. Its tip, `922810a5ed`, is the engine our
-production box has served since 2026-10-27 06:44 UTC.
+(2026-10-18) plus our commits. Our production box has served
+**`922810a5ed`** (tag `prod/2026-10-27`) since 2026-10-27 06:44 UTC: 55
+first-parent commits past the base, one of them a merge (`b1834f39fc`) that
+brings in no code. The commits on madlabs/main after `922810a5ed` change the
+fork's docs, CI and tests, and change and then remove the NVMe PLE reader
+(`tools/ple_nvme/`, now on `madlabs/main-nixl`). None of them touches
+`python/` or `sgl-kernel/`, so the engine code at the branch tip is what
+production runs. This prints nothing:
+`git log --oneline prod/2026-10-27..origin/madlabs/main -- python sgl-kernel`.
 
-The fork's default branch `main` is a plain copy of upstream at `67bb6a58d0`
-(2026-09-25) and carries nothing of ours. Engines are built from the branch
-names below, never from `main`.
+`madlabs/main` is the fork's default branch. The branch `main` is a plain copy
+of upstream at `67bb6a58d0` (2026-09-25) and carries nothing of ours. Engines
+are built from the branch names below, never from `main`.
 
 Where a source below is in **mad-llm-deploy** (our private deployment repo),
 the path is at commit `0c63afe`, the release record of `922810a5ed`, unless it
@@ -58,8 +64,12 @@ What we chose not to carry from it, and why: engine doc:212-231.
 
 Only by fast-forward. Work lands on a branch off madlabs/main, is qualified,
 and then madlabs/main is moved to it with a plain push, which git refuses
-unless it is a fast-forward. Never force-push it. Nothing enforces this yet:
-the fork has no branch protection or rulesets.
+unless it is a fast-forward. Never force-push it. Since 2026-10-28 GitHub
+enforces this: the fork's ruleset "madlabs production lines" refuses a
+force-push to, or a deletion of, `madlabs/main`, `madlabs/main-nixl`,
+`madlabs/pennyroyal-v2.5.0` and `madlabs/v0.5.19-prod`, and the ruleset
+"release and archive tags" refuses deleting or moving a `prod/*` or
+`archive/*` tag.
 
 A rebase onto newer upstream rewrites every commit, so it cannot reach
 madlabs/main by fast-forward. It lands the way the 2026-10-26 merge did
@@ -94,8 +104,10 @@ PLE reader re-pinned for this tree as systemone3". That is false. `5a213706ea`
 pinned the reader's guard to `madlabs/main@84f09ea980`, a commit of
 madlabs/main-next on upstream `f6fcda8827` that is not in this tree's history
 (`git merge-base --is-ancestor 84f09ea980 922810a5ed` fails). Nobody re-pinned
-it for `fe89a7c890` until 2026-10-27; at `922810a5ed`, 7 of the 11 modules it
-guards differed (`tools/ple_nvme/REVIEW-2026-10-27.md` on `madlabs/main-nixl`). The
+the guard for `fe89a7c890` until 2026-10-27; at `922810a5ed`, 7 of the 11
+modules it guards differed (`tools/ple_nvme/REVIEW-2026-10-27.md` on
+`madlabs/main-nixl`). madlabs/main-next was deleted on 2026-10-28; tag
+`archive/main-next-jpeg` still holds its tip and `84f09ea980`. The
 body of `5a213706ea` also still describes the `f6fcda8827` rebase and a
 `+systemone2` deploy note. Published commits are not rewritten, so the
 correction lives here.
@@ -190,18 +202,26 @@ done
 
 ## Production engines
 
-Every engine that has served production, from the CHANGELOG. The fork has no
-tags yet: each engine survives only through the branch listed, so none of
-these branches may be deleted until its tag exists. The proposed names follow
-the CHANGELOG dates. Pushing tags needs the owner's approval (engine
-doc:271-274).
+Every engine that has served production, from the CHANGELOG, and the tag
+that keeps it. Each tag is named for the date its engine began serving and
+points at that engine commit; tags cannot be deleted or moved, so an engine
+stays fetchable whatever happens to its branch. Pushing tags needs the
+owner's approval (engine doc:271-274).
 
-| Served from | Engine | Branch | Proposed tag | CHANGELOG |
+| Served from | Engine | Tag | Branch | CHANGELOG |
 |---|---|---|---|---|
-| 2026-08-24 | `9a906687f0` (Qwen3.8-27B with DFlash2) | `madlabs/v0.5.19-prod` | `prod/2026-08-24` | :134-136 |
-| 2026-09-22 | `8dcd3ec476` (Flash-Next on Pennyroyal) | `madlabs/pennyroyal-v2.5.0` | `prod/2026-09-22` | :100-102 |
-| 2026-10-01 | `c9eb6c2e2d` (Pennyroyal; the rollback for `922810a5ed`) | `madlabs/pennyroyal-v2.5.0` | `prod/2026-10-01` | :57-59, :47 |
-| 2026-10-27 | `922810a5ed` | `madlabs/main` | `prod/2026-10-27` | :11-13 |
+| 2026-08-24 | `9a906687f0` (Qwen3.8-27B with DFlash2) | `prod/2026-08-24` | `madlabs/v0.5.19-prod` | :134-136 |
+| 2026-09-22 | `8dcd3ec476` (Flash-Next on Pennyroyal) | `prod/2026-09-22` | `madlabs/pennyroyal-v2.5.0` | :100-102 |
+| 2026-10-01 | `c9eb6c2e2d` (Pennyroyal; the rollback for `922810a5ed`) | `prod/2026-10-01` | `madlabs/pennyroyal-v2.5.0` | :57-59, :47 |
+| 2026-10-27 | `922810a5ed` | `prod/2026-10-27` | `madlabs/main` | :11-13 |
+
+The `archive/*` tags keep the tips of branches deleted on 2026-10-28 that no
+remaining branch contains, each named after its branch:
+`archive/host-tier-ports`, `archive/main-next-jpeg` (which also holds
+madlabs/main-next's tip), `archive/nixl-bounce-fixes`,
+`archive/spike/mamba-cache-trace`, `archive/spike/mamba-cache-trace-pennyroyal`,
+`archive/systemone-ports` and `archive/trunk-ports`. The five other branches
+deleted that day had their tips on madlabs/main already.
 
 ## One production engine
 
@@ -225,14 +245,6 @@ It stays a superset of madlabs/main: whoever moves madlabs/main merges it into
 `madlabs/main-nixl` the same day, and Andrew may merge madlabs/main into it
 whenever he needs. A merge never touches the reader's files, because this line
 no longer has them.
-
-## Open items
-
-1. **Owner settings, not files:**
-   - tags: done 2026-10-27 (`prod/*`, and `archive/*` for removed branches);
-   - a ruleset that blocks force-push and deletion of `madlabs/main`,
-     `madlabs/pennyroyal-v2.5.0` and `madlabs/v0.5.19-prod`;
-   - making madlabs/main the default branch.
 
 ## Credits
 
