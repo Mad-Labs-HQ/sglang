@@ -258,15 +258,43 @@ branch can fast-forward onto this line once items 1-4 below are done.
    - mad-llm-deploy also has no launcher for this line in NVMe mode:
      `deploy/configs-trunk/serve-flash-next-madllm.sh:98-99` refuses anything
      but `PENNY_PLE_BACKEND=ram`.
-2. **Pennyroyal's two NIXL bounce-buffer fixes are not carried.**
-   `e1a1572743` ("align mixed-state NIXL bounce I/O") and `067c639c0a`
-   ("bound NIXL hybrid bounce transfers", upstream #36524, open) are only on
-   `madlabs/pennyroyal-v2.5.0` and the spike branch
-   `spike/mamba-cache-trace-pennyroyal`. Neither madlabs/main nor
-   `madlabs/systemone-prod` has them (`git branch -r --contains`). The engine
-   doc lists them as "under decision" (:219). Andrew's disk tier needs them if
-   any of its pools goes through the staging path; his engine's startup log
-   shows which (`registered hybrid host pool ... zero_copy=`).
+2. **Pennyroyal's two NIXL bounce-buffer fixes are carried, but Andrew's
+   setup has not run them yet.**
+   - `72a1f20499` ports `067c639c0a` ("bound NIXL hybrid bounce transfers")
+     with no edits. Its patch-id, `b36d593de6`, is the original's and also
+     upstream #36524's (open).
+   - `d42b47dfe2` ports `e1a1572743` ("align mixed-state NIXL bounce I/O") on
+     top of upstream #43593, `46a97e5540`. Its message gives that commit as
+     `46a97e554e`, which does not exist. Published commits are not rewritten,
+     so the correction lives here.
+   - Both change only the staging ("bounce") path in `hicache_nixl.py`. That
+     module loads only when the storage backend is `nixl`
+     (`backend_factory.py`:212-216), and our box has no NIXL tier. The engine
+     doc still lists them as "under decision" (:219).
+   - To check on Andrew's box, along with item 3:
+     - Run the storage test file where `/tmp` is under 80% full. Its tests
+       write under `/tmp` with the NIXL L3 cleaner on, its default
+       (`nixl_utils.py`:51-55). Above 80% the cleaner deletes their files
+       mid-test, and which tests fail changes from run to run. In a Linux CPU
+       container with the NIXL 1.4.0 wheel and `/tmp` 75% full, main's copy
+       of the file gave 25 passed and 1 skipped, and this one 36 passed and 1
+       skipped (the OBJ test, which needs MinIO). The 11 tests the two
+       commits add pass, and none of main's newly fails.
+     - With O_DIRECT on, each `registered hybrid host pool <name>
+       zero_copy=False` line in the startup log (`hicache_nixl.py`:485-489)
+       is a pool that goes through the changed code.
+     - Start from an empty L3 directory. Under O_DIRECT, the older code could
+       leave 0-byte files for these pools. A file that exists counts as a hit
+       (`hicache_nixl.py`:250-259), so those files would be restored as
+       cache hits (upstream issue #45563).
+   - Neither commit fixes the KV cache's own staging slots, which are the
+     page's exact size (`hicache_nixl.py`:416-427). Under O_DIRECT, a KV pool
+     uses them when its layout has no zero-copy mode (:363-366) or its buffer
+     is not 4 KiB aligned (the warning at :400-406). If its page is not a
+     multiple of 4096 bytes, a filesystem that enforces O_DIRECT alignment
+     refuses those writes, as it did the hybrid pools' before `d42b47dfe2`.
+     `storage/nixl/README.md`:456 says this fallback needs no user action;
+     in that case it does.
 3. **Qualify in Andrew's shape**, with the NIXL disk tier and the NVMe reader.
    Run `test/registered/unit/mem_cache/test_hicache_nixl_storage.py` whole,
    in one process, on the qualification box. Its tests now close their NIXL
