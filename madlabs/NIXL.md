@@ -70,13 +70,16 @@ its `+systemone` version (`tools/ple_nvme/README.md`, "Source guard").
      but nobody has run the decision-burst memory gate with the reader
      loaded.
    - mad-llm-deploy also has no launcher for this line in NVMe mode:
-     `deploy/configs-trunk/serve-flash-next-madllm.sh:98-99` refuses anything
-     but `PENNY_PLE_BACKEND=ram`.
+     `deploy/configs-trunk/serve-flash-next-madllm.sh:99-100` (main
+     `ca92cfe3f0`) refuses anything but `PENNY_PLE_BACKEND=ram`.
 2. **Pennyroyal's two NIXL bounce-buffer fixes are carried here, not on
-   madlabs/main** (owner, 2026-10-28: NIXL runs only on Andrew's dev machine). They are `72a1f20499` (port of
-   `067c639c0a`, "bound NIXL hybrid bounce transfers", the same patch as
-   upstream #36524, open) and `d42b47dfe2` (port of `e1a1572743`, "align
-   mixed-state NIXL bounce I/O"), both authored by John Pezzulli.
+   madlabs/main** (owner, 2026-10-28: NIXL runs only on Andrew's dev
+   machine). They are `caeb776686` (port of `067c639c0a`, "bound NIXL hybrid
+   bounce transfers", the same patch as upstream #36524, open) and
+   `d7d2358142` (port of `e1a1572743`, "align mixed-state NIXL bounce I/O"),
+   both authored by John Pezzulli. They were first committed as `72a1f20499`
+   and `d42b47dfe2` on madlabs/nixl-bounce-fixes, which was deleted on
+   2026-10-28; tag `archive/nixl-bounce-fixes` holds them.
 3. **Andrew qualifies this branch on his dev machine** when he can,
    with the NIXL disk tier and the NVMe reader: item 1's GPU checks, and
    `test/registered/unit/mem_cache/test_hicache_nixl_storage.py` whole, in one
@@ -86,4 +89,6 @@ its `+systemone` version (`tools/ple_nvme/README.md`, "Source guard").
    not yet known.
 4. **mad-llm-deploy has an NVMe-mode serve config on a parked branch,**
    `feat/trunk-nvme-ple`, for the day Andrew's box is declared there. Its
-   RAM launch is byte-identical to mad-llm-1's.
+   RAM launch is byte-identical to mad-llm-1's. The tag
+   `archive/feat-trunk-nvme-ple` in mad-llm-deploy holds the branch's tip,
+   `a3f13a3888`, and keeps the config if the branch is deleted.
