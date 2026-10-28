@@ -241,7 +241,9 @@ branch can fast-forward onto this line once items 1-4 below are done.
      breakable CUDA graphs by default, and on those replays the reader would
      add zero PLE rows without an error. In NVMe mode the reader now turns
      prefill graphs off, and refuses to start if the launch asks for one
-     (`edcaf4109c`). So NVMe-mode prefill runs eager, as Qwen4-Exp prefill
+     (`edcaf4109c`). Its PLE prefetch also raises inside any breakable CUDA
+     graph, so a breakable graph selected some other way stops the server at
+     startup. NVMe-mode prefill therefore runs eager, as Qwen4-Exp prefill
      does in a default launch on `madlabs/systemone-prod`, where Qwen4-Exp is
      left off the breakable-prefill list (`configs/model_config.py`:2312
      there).
@@ -260,7 +262,7 @@ branch can fast-forward onto this line once items 1-4 below are done.
      `3c8fe2e97b`'s message says the crate set `cargo generate-lockfile`
      picked "was never built with this code"; nothing records that.
    - Check the out-of-memory fix too. The `3a12b433f9` line changed the code
-     the reader subclasses and calls (`qwen4.py:32` subclasses
+     the reader subclasses and calls (`qwen4.py:35` subclasses
      `Qwen4ExpPLELayer`). The review found no reader change needed for it,
      but nobody has run the decision-burst memory gate with the reader
      loaded.

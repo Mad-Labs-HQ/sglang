@@ -104,11 +104,11 @@ PYTHONPATH="$PWD/.ple-nvme:$PWD/python" .venv/bin/python -m pytest \
 The reader, gather and graph adapter are unchanged from Pennyroyal except
 where this tree moved: the layer hook targets `qwen3_5.make_pp_layers`
 (`5a213706ea`), `backend.py` imports `get_attn_tp_context` from
-`layer_boundary` (`ca8e9b88eb`), and `config.py` keeps prefill CUDA graphs off
-(below). Otherwise this port changes only the source guard, the package
-version, file locations and the tests that needed Pennyroyal's launcher. The
-upstream CLI runtime installer is not exposed, and no replacement QSA/MTP
-runtime is included.
+`layer_boundary` (`ca8e9b88eb`), `config.py` keeps prefill CUDA graphs off,
+and `qwen4.py` refuses breakable CUDA graphs (both below). Otherwise this port
+changes only the source guard, the package version, file locations and the
+tests that needed Pennyroyal's launcher. The upstream CLI runtime installer is
+not exposed, and no replacement QSA/MTP runtime is included.
 
 Pennyroyal qualified only TP1 Flash-Next on Linux x86_64 with Python 3.12. TP2,
 CPU expert offload, prefill CUDA graphs and other speculative modes are
@@ -116,3 +116,6 @@ unsupported. The reader stages rows only for decode/verify graph replay.
 SGLang now captures Qwen4-Exp prefill in breakable CUDA graphs by default, so
 in NVMe mode the reader sets `--cuda-graph-backend-prefill disabled` when the
 launch picks no prefill graph, and refuses to start when it asks for one.
+The PLE prefetch also raises inside any breakable CUDA graph, prefill or
+decode, so a breakable graph selected some other way stops the server at
+startup instead of serving zero PLE rows.

@@ -10,6 +10,9 @@ import torch
 import sglang.srt.models.qwen4_exp as qwen4
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.runner import get_is_capture_mode
+from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph import (
+    is_in_breakable_cuda_graph,
+)
 from sglang.srt.utils import logger
 
 from .backend import SSDStreamEmbedding
@@ -81,6 +84,18 @@ class Qwen4PLELayer(qwen4.Qwen4ExpPLELayer):
         batch: qwen4._PLEBatch | None,
         forward_batch: ForwardBatch,
     ) -> None:
+        # A breakable prefill graph runs this prefetch in an eager break with
+        # capture mode on, where the code below binds a captured buffer and
+        # reads no rows. config.py keeps prefill graphs off at launch; this
+        # refuses any breakable graph, prefill or decode, during its warmup at
+        # startup, should anything outside that launch check select one.
+        if is_in_breakable_cuda_graph():
+            raise RuntimeError(
+                "SSD Stream stages PLE rows only in eager forwards and full "
+                "decode/verify CUDA graph replay; breakable CUDA graphs are not "
+                "supported (use --cuda-graph-backend-prefill disabled and a full "
+                "or disabled decode graph)"
+            )
         if self._prefetch_state is not None:
             raise RuntimeError("PLE prefetch state was not consumed before reuse")
         if batch is None:
