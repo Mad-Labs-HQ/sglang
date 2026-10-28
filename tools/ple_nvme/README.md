@@ -93,7 +93,8 @@ PYTHONPATH="$PWD/.ple-nvme:$PWD/python" .venv/bin/python -m pytest \
   tools/ple_nvme/tests tools/ple_nvme/ssd_stream/tests
 ```
 
-`ssd_stream/tests/gpu_smoke.py` needs a GPU and a prepared table.
+`ssd_stream/tests/gpu_smoke.py` needs a GPU. It builds its own small table, and
+it does not import the model adapter (`qwen4.py`).
 
 ## Source and limits
 

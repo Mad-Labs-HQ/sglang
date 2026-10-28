@@ -250,8 +250,13 @@ branch can fast-forward onto this line once items 1-4 below are done.
    - Still to do on Andrew's box: reinstall the reader into a fresh
      `PENNY_PLE_PLUGIN_DIR`, key NIXL on `0.2.0+systemone4` if his launcher
      keys it on the reader version, run `ssd_stream/tests/gpu_smoke.py`, and
-     serve once in NVMe mode, checking the output against RAM mode on the same
-     prompts.
+     serve once in NVMe mode, checking the tokens against a RAM-mode run with
+     prefill graphs off too, greedy decoding and the same engine commit. RAM
+     mode captures prefill graphs by default, so without that the comparison
+     cannot tell the reader from graph-versus-eager numerics. The smoke test
+     does not touch the model adapter, so the serve comparison is the only
+     check of it. The steps and what the startup log should show are in
+     `tools/ple_nvme/REVIEW-2026-10-27.md`, "Needs a GPU".
    - Compare `ssd_stream/Cargo.lock` with the crate versions in Andrew's
      built reader. The `+systemone4` bump changed only the reader's own
      version in the lock. The committed lock is the SSD
