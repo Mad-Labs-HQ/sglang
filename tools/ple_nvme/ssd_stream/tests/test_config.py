@@ -151,6 +151,85 @@ def test_cpu_offload_requires_graphs_and_mtp_disabled(monkeypatch, tmp_path):
         config.configure_cli(namespace)
 
 
+def _prefill_namespace(**overrides):
+    values = dict(
+        model_path="prepared",
+        revision=None,
+        ple_offload_embedding=False,
+        cpu_offload_gb=0,
+        offload_group_size=-1,
+        disable_cuda_graph=False,
+        disable_decode_cuda_graph=False,
+        disable_prefill_cuda_graph=False,
+        cuda_graph_config=None,
+        cuda_graph_backend_decode=None,
+        cuda_graph_backend_prefill=None,
+        speculative_algorithm=None,
+        startup_weight_load_mode="normal",
+    )
+    values.update(overrides)
+    return Namespace(**values)
+
+
+@pytest.fixture
+def prepared_artifact(monkeypatch, tmp_path):
+    monkeypatch.delenv("SGLANG_SSD_STREAM_CONFIG", raising=False)
+    _, manifest, _ = _artifact(tmp_path)
+    monkeypatch.setattr(
+        config,
+        "_resolve_artifact",
+        lambda model_path, revision: (manifest, None),
+    )
+
+
+def test_default_prefill_cuda_graph_is_turned_off(prepared_artifact):
+    namespace = _prefill_namespace()
+
+    config.configure_cli(namespace)
+
+    assert namespace.cuda_graph_backend_prefill == "disabled"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"disable_prefill_cuda_graph": True},
+        {"disable_cuda_graph": True},
+        {"cuda_graph_backend_prefill": "disabled"},
+        {
+            "cuda_graph_backend_prefill": "breakable",
+            "cuda_graph_config": {"prefill": {"backend": "disabled"}},
+        },
+    ],
+)
+def test_disabled_prefill_cuda_graph_is_accepted(prepared_artifact, overrides):
+    namespace = _prefill_namespace(**overrides)
+
+    config.configure_cli(namespace)
+
+    assert namespace.cuda_graph_backend_prefill == overrides.get(
+        "cuda_graph_backend_prefill"
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"cuda_graph_backend_prefill": "breakable"},
+        {"cuda_graph_backend_prefill": "full"},
+        {"disable_prefill_cuda_graph": True, "cuda_graph_backend_prefill": "full"},
+        {"cuda_graph_config": {"prefill": {"backend": "breakable"}}},
+        {
+            "cuda_graph_backend_prefill": "disabled",
+            "cuda_graph_config": {"prefill": {"backend": "full"}},
+        },
+    ],
+)
+def test_prefill_cuda_graph_is_rejected(prepared_artifact, overrides):
+    with pytest.raises(ValueError, match="does not support prefill CUDA graphs"):
+        config.configure_cli(_prefill_namespace(**overrides))
+
+
 def test_manifest_rejects_wrong_table_size(tmp_path):
     _, manifest, _ = _artifact(tmp_path, table_bytes=b"short")
 

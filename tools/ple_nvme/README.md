@@ -104,13 +104,18 @@ PYTHONPATH="$PWD/.ple-nvme:$PWD/python" .venv/bin/python -m pytest \
 [SSD Stream v0.2.0](https://github.com/garnermccloud/sglang-ssd-stream/tree/176a522ef9d6dbb5056ae1f467fe49af0f1258a5)
 (Apache-2.0; its license is retained). It came here from Pennyroyal v2.5.0
 (jpezzulli/sglang-rtxpro6000, commits 97871a356, 435023d4a and 239312931).
-The reader, gather and graph adapter are unchanged from Pennyroyal. This port
-changes only the source guard, the package version, file locations and the
-tests that needed Pennyroyal's launcher. The upstream CLI runtime installer
-is not exposed, and no replacement QSA/MTP runtime is included.
+The reader, gather and graph adapter are unchanged from Pennyroyal except
+where this tree moved: the layer hook targets `qwen3_5.make_pp_layers`
+(`5a213706ea`), `backend.py` imports `get_attn_tp_context` from
+`layer_boundary` (`ca8e9b88eb`), and `config.py` keeps prefill CUDA graphs off
+(below). Otherwise this port changes only the source guard, the package
+version, file locations and the tests that needed Pennyroyal's launcher. The
+upstream CLI runtime installer is not exposed, and no replacement QSA/MTP
+runtime is included.
 
 Pennyroyal qualified only TP1 Flash-Next on Linux x86_64 with Python 3.12. TP2,
 CPU expert offload, prefill CUDA graphs and other speculative modes are
-unsupported. Qwen4-Exp keeps prefill CUDA graphs disabled by default, and the
-reader stages rows only for decode/verify graph replay, so do not force
-`--cuda-graph-backend-prefill` on.
+unsupported. The reader stages rows only for decode/verify graph replay.
+SGLang now captures Qwen4-Exp prefill in breakable CUDA graphs by default, so
+in NVMe mode the reader sets `--cuda-graph-backend-prefill disabled` when the
+launch picks no prefill graph, and refuses to start when it asks for one.

@@ -158,6 +158,24 @@ def _resolve_artifact(model_path: str, revision: str | None) -> tuple[Path, str 
     return snapshot / _MANIFEST_NAME, commit
 
 
+def _requested_prefill_graph_backend(namespace: argparse.Namespace) -> str | None:
+    """The prefill CUDA graph backend the launch names, or None for SGLang's
+    default. Same precedence as SGLang's parse_cuda_graph_config:
+    --cuda-graph-config, then --cuda-graph-backend-prefill, then the disable
+    flags."""
+    graph_config = getattr(namespace, "cuda_graph_config", None)
+    if graph_config is not None and not isinstance(graph_config, dict):
+        graph_config = graph_config.to_dict()
+    backend = ((graph_config or {}).get("prefill") or {}).get("backend")
+    if backend is None:
+        backend = namespace.cuda_graph_backend_prefill
+    if backend is None and (
+        namespace.disable_cuda_graph or namespace.disable_prefill_cuda_graph
+    ):
+        backend = "disabled"
+    return backend
+
+
 def configure_cli(*args, **kwargs):
     """Resolve the immutable prepared artifact and enable SSD streaming."""
     namespace = next(
@@ -166,6 +184,19 @@ def configure_cli(*args, **kwargs):
     )
     if namespace is None:
         raise RuntimeError("SGLang did not provide parsed server arguments")
+
+    # SGLang captures Qwen4-Exp prefill in breakable CUDA graphs by default.
+    # Their replay runs the PLE prefetch with capture mode on, where
+    # Qwen4PLELayer.start_prefetch only binds a captured buffer and reads no
+    # rows, so a replayed prefill would add zero PLE rows. Keep prefill eager.
+    prefill_graph = _requested_prefill_graph_backend(namespace)
+    if prefill_graph is None:
+        namespace.cuda_graph_backend_prefill = "disabled"
+    elif prefill_graph != "disabled":
+        raise ValueError(
+            "SSD Stream does not support prefill CUDA graphs; got prefill "
+            f"backend {prefill_graph!r}, use --cuda-graph-backend-prefill disabled"
+        )
 
     manifest_path, commit = _resolve_artifact(namespace.model_path, namespace.revision)
     config = load_manifest(manifest_path)
