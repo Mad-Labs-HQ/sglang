@@ -44,7 +44,7 @@ sgl-project/sglang on 2026-10-27.
 | SM120 online MXFP8 | `95300400b0`, `ce34895c4e`, `20de35f49b`, `f802f591c7`, `6dae25d1d1` (Andrew Stanton, from Pennyroyal `97871a3566`); `5bba1e849b`, `e6098e4b87` (ours: test entry points, import order) | 8-bit weights for Flash-Next's BF16 projections, the hyperconnection mix and `lm_head` on RTX PRO 6000 (SM120). Switch `SGLANG_SM120_ONLINE_MXFP8`, default off (`environ.py:1106`) | none; specific to this card |
 | Request lifecycle spans | `f723260b9d` (John Pezzulli, from Pennyroyal `730d244a08`) | per-request timing spans that our analysis reads | none |
 | Image preprocessing device | `413719a8b2`, `8bd82e73d3` (John Pezzulli) | `SGLANG_MM_PREPROCESS_DEVICE` (`environ.py:1501`) keeps image decoding off the GPU in the front-end process, which otherwise holds a second ~630 MiB on the card (engine doc:227) | none |
-| NVMe PLE reader, `tools/ple_nvme/` | `67b41d6db4`, `25b9f3f758`, `5a213706ea` (Andrew Stanton); `ca8e9b88eb`, `24fd0509d6` (ours) | reads the 47.68 GiB PLE table from NVMe instead of RAM, for Andrew's 93 GiB box (engine doc:33; `tools/ple_nvme/README.md`). Its source guard is stale on this tree: see "Open items" | none |
+| NVMe PLE reader, `tools/ple_nvme/` | `67b41d6db4`, `25b9f3f758`, `5a213706ea` (Andrew Stanton); `ca8e9b88eb`, `24fd0509d6`, `edcaf4109c` and the `+systemone4` re-pin (ours) | reads the 47.68 GiB PLE table from NVMe instead of RAM, for Andrew's 93 GiB box (engine doc:33; `tools/ple_nvme/README.md`). Re-pinned to this tree, not yet run on a GPU: see "Open items" | none |
 | Prefill out-of-memory fix | `142800d641` (Qiaolin Yu); `8a18f5888f` (shi yang); `d2874d97af`, `01b10d5751`, `fe0d496131`, `3a12b433f9` (ours) | `f132f9b522` ran out of GPU memory under decision bursts with prefill CUDA graphs on (2026-10-20). Fix: the packed PLE convolution and freed per-bucket outputs, then hardening and bitwise, memory and fallback tests (CHANGELOG:26-28) | #44150 merged 2026-10-19 as `9ab74b8517`, after our base: drop `142800d641` at the next rebase. #43032 open |
 | API-key redaction | `922810a5ed` | `--api-key` and `--admin-api-key` were printed in the startup log, `/server_info` and the recorded launch command | issue #37457 open |
 
@@ -95,7 +95,8 @@ PLE reader re-pinned for this tree as systemone3". That is false. `5a213706ea`
 pinned the reader's guard to `madlabs/main@84f09ea980`, a commit of
 madlabs/main-next on upstream `f6fcda8827` that is not in this tree's history
 (`git merge-base --is-ancestor 84f09ea980 922810a5ed` fails). Nobody re-pinned
-it for `fe89a7c890`. On this tree, 7 of the 11 modules it guards differ. The
+it for `fe89a7c890` until 2026-10-27; at `922810a5ed`, 7 of the 11 modules it
+guards differed (`tools/ple_nvme/REVIEW-2026-10-27.md`). The
 body of `5a213706ea` also still describes the `f6fcda8827` rebase and a
 `+systemone2` deploy note. Published commits are not rewritten, so the
 correction lives here.
@@ -178,7 +179,8 @@ runner:
   (`test_parity`, `test_prefill_result_polling`,
   `test_scheduler_chunked_req_gate`, `test_server_args_docs_coverage`).
 - `ple-nvme` builds the reader with `--locked`, then runs its tests. Its
-  "Source guard" step fails until the guard is refreshed (see "Open items").
+  "Source guard" step fails when a guarded module changes without a re-pin
+  (`tools/ple_nvme/README.md`, "Source guard").
 
 GitHub Actions is turned off on this fork. Turning it on also arms upstream's
 workflow files that fire on any pull request, `pr-test.yml` among them (its
@@ -228,23 +230,29 @@ branch can fast-forward onto this line once items 1-4 below are done.
 
 ## Open items
 
-1. **The NVMe PLE reader cannot start on this tree.** Its guard,
-   `tools/ple_nvme/ssd_stream/src/sglang_ssd_stream/pennyroyal-source.json:2`,
-   pins `madlabs/main@84f09ea980`, and 7 of its 11 modules differ here:
-   `qsa.sparse_attn`, `qwen_sparse_attn_backend`, `qwen4_exp`, `qwen3_5`,
-   `decode_cuda_graph_runner`, `server_args`, `utils.common`.
-   - With `PENNY_PLE_BACKEND=nvme`, `plugin.py:187` raises and `register()`
-     exits the server (`plugin.py:102-107`). RAM mode, which our box runs,
-     returns before the guard (`plugin.py:100-101`).
-   - On Linux x86_64 (an emulated container),
-     `tools/ple_nvme/tests/test_source_guard.py` and 9 reader tests fail on
-     the guard. The workflow's `GUARD_TESTS` lists them.
-   - The fix changes runtime files, so it is not made here. Follow
-     `tools/ple_nvme/README.md` "Source guard": review the adapter against
-     the 7 modules, refresh the guard, bump to `+systemone4` (and
-     `Cargo.lock`), and smoke-test NVMe mode on a GPU box.
-   - Before the `+systemone4` bump, compare `ssd_stream/Cargo.lock` with the
-     crate versions in Andrew's built reader. The committed lock is the SSD
+1. **The NVMe PLE reader is re-pinned to this tree but has not run on a
+   GPU.** Its guard pinned `madlabs/main@84f09ea980`, and 7 of its 11 modules
+   differed here (`qsa.sparse_attn`, `qwen_sparse_attn_backend`, `qwen4_exp`,
+   `qwen3_5`, `decode_cuda_graph_runner`, `server_args`, `utils.common`), so
+   NVMe mode exited at startup. `tools/ple_nvme/REVIEW-2026-10-27.md` reviews
+   the reader against those 7 changes. The guard now pins
+   `madlabs/main@ae7ec4de75`, and the reader is `0.2.0+systemone4`.
+   - The review found one break. This tree captures Qwen4-Exp prefill in
+     breakable CUDA graphs by default, and on those replays the reader would
+     add zero PLE rows without an error. In NVMe mode the reader now turns
+     prefill graphs off, and refuses to start if the launch asks for one
+     (`edcaf4109c`). So NVMe-mode prefill runs eager, as Qwen4-Exp prefill
+     does in a default launch on `madlabs/systemone-prod`, where Qwen4-Exp is
+     left off the breakable-prefill list (`configs/model_config.py`:2312
+     there).
+   - Still to do on Andrew's box: reinstall the reader into a fresh
+     `PENNY_PLE_PLUGIN_DIR`, key NIXL on `0.2.0+systemone4` if his launcher
+     keys it on the reader version, run `ssd_stream/tests/gpu_smoke.py`, and
+     serve once in NVMe mode, checking the output against RAM mode on the same
+     prompts.
+   - Compare `ssd_stream/Cargo.lock` with the crate versions in Andrew's
+     built reader. The `+systemone4` bump changed only the reader's own
+     version in the lock. The committed lock is the SSD
      Stream v0.2.0 release lock (`3c8fe2e97b`), not a record of his build.
      Until that commit the repo had no lock for the reader (`.gitignore`:232
      on madlabs/main ignores `Cargo.lock`), so a build's crate versions were
@@ -253,8 +261,9 @@ branch can fast-forward onto this line once items 1-4 below are done.
      picked "was never built with this code"; nothing records that.
    - Check the out-of-memory fix too. The `3a12b433f9` line changed the code
      the reader subclasses and calls (`qwen4.py:32` subclasses
-     `Qwen4ExpPLELayer`), and nobody has run the decision-burst memory gate
-     with the reader loaded.
+     `Qwen4ExpPLELayer`). The review found no reader change needed for it,
+     but nobody has run the decision-burst memory gate with the reader
+     loaded.
    - mad-llm-deploy also has no launcher for this line in NVMe mode:
      `deploy/configs-trunk/serve-flash-next-madllm.sh:98-99` refuses anything
      but `PENNY_PLE_BACKEND=ram`.

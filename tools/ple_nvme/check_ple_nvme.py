@@ -326,7 +326,7 @@ def check(source: Path, prepared: Path) -> str:
     from sglang_ssd_stream.config import load_manifest
 
     version = importlib.metadata.version("sglang-ssd-stream")
-    expected_version = "0.2.0+systemone3"
+    expected_version = "0.2.0+systemone4"
     if version != expected_version or loaded_version != expected_version:
         raise ValueError(
             "Install the optional NVMe PLE reader "

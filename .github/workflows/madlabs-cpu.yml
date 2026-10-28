@@ -6,8 +6,8 @@ name: madlabs CPU
 #             four upstream CPU tests the fork's changes broke and this branch
 #             fixed, one process per file as upstream's run_suite.py does;
 #   ple-nvme  the NVMe PLE reader: built with its committed Cargo.lock, then
-#             its tests. The source-guard step fails until the reader's guard
-#             is refreshed for this tree (madlabs/README.md, "Open items").
+#             its tests. The source-guard step fails when a guarded SGLang
+#             module changes without a re-pin (tools/ple_nvme/README.md).
 # GitHub Actions is turned off on Mad-Labs-HQ/sglang, so nothing runs until an
 # owner turns it on. Turning it on also arms upstream's workflows that fire on
 # every pull request; see madlabs/README.md, "CPU tests".
@@ -166,8 +166,8 @@ jobs:
           PYTHONPATH="$PWD/.ple-nvme" python3 -m pytest -q -p no:cacheprovider \
             "${dirs[@]}" -k "$expr"
 
-      # Fails until the guard is refreshed for this tree; pytest also fails
-      # (exit 5) if no test matches, so the guard cannot drop out unnoticed.
+      # Fails when a guarded module changed without a re-pin; pytest also
+      # fails (exit 5) if no test matches, so the guard cannot drop out unnoticed.
       - name: Source guard
         if: ${{ !cancelled() }}
         run: |
