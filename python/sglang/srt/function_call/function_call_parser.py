@@ -1,4 +1,5 @@
 import inspect
+import json
 import logging
 from typing import Dict, List, Literal, Optional, Set, Tuple, Type, Union
 
@@ -61,6 +62,31 @@ from sglang.srt.function_call.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _missing_required(schema, value, path: str = "") -> List[str]:
+    """Paths of the `required` keys that `value` leaves out, at any depth.
+
+    Follows only `properties`, `items` and `required`; whatever sits behind
+    $ref, anyOf and the like is not checked.
+    """
+    if not isinstance(schema, dict):
+        return []
+    missing = []
+    if isinstance(value, dict):
+        properties = schema.get("properties") or {}
+        for key in schema.get("required") or []:
+            if key not in value:
+                missing.append(f"{path}.{key}" if path else key)
+        for key, item in value.items():
+            if key in properties:
+                missing += _missing_required(
+                    properties[key], item, f"{path}.{key}" if path else key
+                )
+    elif isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for i, item in enumerate(value):
+            missing += _missing_required(schema["items"], item, f"{path}[{i}]")
+    return missing
 
 
 class FunctionCallParser:
@@ -141,6 +167,75 @@ class FunctionCallParser:
         self.detector = self._required_tool_parser or detector
         self.tools = tools
         self.tool_strict_level = envs.SGLANG_TOOL_STRICT_LEVEL.get()
+        # tool_index -> [name, arguments streamed so far], for _note_required_keys
+        self._streamed_calls: Dict[int, List[str]] = {}
+
+    # Process-wide tally for _note_required_keys: calls checked, calls missing
+    # a required key, calls whose arguments were not valid JSON.
+    _required_tally = [0, 0, 0]
+    _REQUIRED_TALLY_EVERY = 500
+
+    @classmethod
+    def _required_tally_text(cls) -> str:
+        checked, missing, invalid = cls._required_tally
+        return (
+            f"{missing} missing a required key, {invalid} not valid JSON, "
+            f"of {checked} calls since start"
+        )
+
+    def _note_required_keys(self, calls: List[Tuple[str, str]]) -> None:
+        """Log tool calls whose arguments leave out a required key.
+
+        A strict grammar built with structural_tag_any_order only bounds how
+        many keys a call has, not which ones (measured 2026-11-02), so this
+        counts how often the model actually leaves a required key out.
+        Arguments that are not valid JSON are counted as well; a call cut
+        off by max_tokens lands there too.
+        """
+        if not calls:
+            return
+        try:
+            self._check_required_keys(calls)
+        except Exception:  # A measurement must never fail a response.
+            logger.debug("Tool call required-key check failed", exc_info=True)
+
+    def _check_required_keys(self, calls: List[Tuple[str, str]]) -> None:
+        schemas = {tool.function.name: tool.function.parameters for tool in self.tools}
+        tally = FunctionCallParser._required_tally
+        for name, arguments in calls:
+            if name not in schemas:
+                continue
+            tally[0] += 1
+            try:
+                missing = _missing_required(schemas[name], json.loads(arguments))
+            except (TypeError, ValueError):
+                tally[2] += 1
+                logger.warning(
+                    "Tool call %r arguments are not valid JSON (%d chars); %s",
+                    name,
+                    len(arguments or ""),
+                    self._required_tally_text(),
+                )
+                continue
+            if missing:
+                tally[1] += 1
+                logger.warning(
+                    "Tool call %r omits required %s; %s",
+                    name,
+                    ", ".join(missing),
+                    self._required_tally_text(),
+                )
+            if tally[0] % self._REQUIRED_TALLY_EVERY == 0:
+                logger.info(
+                    "Tool call required-key check: %s", self._required_tally_text()
+                )
+
+    def _collect_streamed(self, calls: List[ToolCallItem]) -> None:
+        for call in calls:
+            name_args = self._streamed_calls.setdefault(call.tool_index, ["", ""])
+            if call.name:
+                name_args[0] = call.name
+            name_args[1] += call.parameters or ""
 
     def owns_tool_format(self) -> bool:
         return (
@@ -181,6 +276,7 @@ class FunctionCallParser:
         has_tool_call = self.detector.has_tool_call(full_text)
         parsed_result = self.detector.detect_and_parse(full_text, self.tools)
         tool_call_list = parsed_result.calls
+        self._note_required_keys([(c.name, c.parameters) for c in tool_call_list])
         if tool_call_list or has_tool_call:
             return parsed_result.normal_text, tool_call_list
         else:
@@ -209,6 +305,7 @@ class FunctionCallParser:
         if sp_result.calls:
             final_calls.extend(sp_result.calls)
             final_normal_text = sp_result.normal_text
+            self._collect_streamed(sp_result.calls)
 
         return final_normal_text, final_calls
 
@@ -221,6 +318,11 @@ class FunctionCallParser:
         if not self.tools:
             return "", []
         sp_result = self.detector.finish(self.tools)
+        self._collect_streamed(sp_result.calls)
+        self._note_required_keys(
+            [tuple(name_args) for name_args in self._streamed_calls.values()]
+        )
+        self._streamed_calls.clear()
         return sp_result.normal_text, sp_result.calls
 
     def get_legacy_structural_tag(

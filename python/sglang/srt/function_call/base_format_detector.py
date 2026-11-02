@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 class BaseFormatDetector(ABC):
     """Base class providing two sets of interfaces: one-time and streaming incremental."""
 
+    # Passed to XGrammar's get_model_structural_tag. False keeps every tool
+    # schema's declared property order (XGrammar's default); a format whose
+    # model writes properties in its own order sets True.
+    structural_tag_any_order: bool = False
+
     def __init__(self):
         # Streaming state management
         # Buffer for accumulating incomplete patterns that arrive across multiple streaming chunks
@@ -428,6 +433,7 @@ class BaseFormatDetector(ABC):
             tools=converted_tools,
             tool_choice=converted_tool_choice,
             reasoning=thinking_mode,
+            any_order=self.structural_tag_any_order,
             parallel_tool_calls=parallel_tool_calls,
         )
 

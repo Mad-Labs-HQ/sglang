@@ -44,6 +44,19 @@ _STRICT_JSON = json.JSONDecoder(
 
 
 class Qwen3CoderDetector(BaseFormatDetector):
+    # The model writes parameters and nested object properties in its own
+    # order, not the schema's. Under XGrammar's default declared-order grammar
+    # every property listed before one already written becomes unreachable:
+    # its value is silently dropped, the model gets trapped inside a string it
+    # can no longer close, or the call is forced shut and the parameter it
+    # wanted lands after </function> as stray markup. Measured 2026-11-01 under
+    # SGLANG_TOOL_STRICT_LEVEL=2: with an alphabetical widget schema, 6 of 6
+    # calls lost points/labels/style/color. any_order still rejects undeclared
+    # keys (so the `arguments` envelope stays out), but of `required` it only
+    # enforces a key count, not which keys, and a key may repeat (the later
+    # value wins). FunctionCallParser logs calls that omit a required key.
+    structural_tag_any_order = True
+
     def __init__(self):
         super().__init__()
 
