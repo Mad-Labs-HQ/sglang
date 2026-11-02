@@ -1,14 +1,17 @@
 # Mad Labs SGLang trunk: madlabs/main
 
 Branch `madlabs/main` is upstream sgl-project/sglang at **`fe89a7c890`**
-(2026-10-18) plus our commits. Our production box has served
-**`922810a5ed`** (tag `prod/2026-10-27`) since 2026-10-27 06:44 UTC: 55
-first-parent commits past the base, one of them a merge (`b1834f39fc`) that
-brings in no code. The commits on madlabs/main after `922810a5ed` change the
-fork's docs, CI and tests, and change and then remove the NVMe PLE reader
-(`tools/ple_nvme/`, now on `madlabs/main-nixl`). None of them touches
-`python/` or `sgl-kernel/`, so the engine code at the branch tip is what
-production runs. This prints nothing:
+(2026-10-18) plus our commits. mad-llm-1 has served **`922810a5ed`** (tag
+`prod/2026-10-27`) since 2026-10-27 06:44 UTC: 55 first-parent commits past
+the base, one of them a merge (`b1834f39fc`) that brings in no code.
+
+One engine line serves every box. What differs per box is configuration,
+chosen from its machine ("Per-instance settings" below). Since `922810a5ed`
+the line has gained the NVMe PLE reader (`tools/ple_nvme/`) and Pennyroyal's
+two NIXL bounce-buffer fixes, which act only on a box configured for them,
+and the qwen3_coder any-order tool grammar with its required-key log, which
+changes every box's tool calls. So the engine code at the branch tip is no
+longer exactly what mad-llm-1 runs; this lists the difference:
 `git log --oneline prod/2026-10-27..origin/madlabs/main -- python sgl-kernel`.
 
 `madlabs/main` is the fork's default branch. The branch `main` is a plain copy
@@ -31,6 +34,8 @@ says `main`. "CHANGELOG" means mad-llm-deploy `deploy/CHANGELOG.md`, and
 | 2026-10-26 | `b1834f39fc` merges the old madlabs/main (`f9bfb5802d`) without taking its code, so madlabs/main can move here by fast-forward; then `922810a5ed` | `git show b1834f39fc` |
 | 2026-10-27 01:16 UTC | madlabs/main moves from `f9bfb5802d` to `922810a5ed` by fast-forward | the fork's activity log |
 | 2026-10-27 | `922810a5ed` serves production | CHANGELOG:11-13, 47 |
+| 2026-10-27 | The NVMe PLE reader and the NIXL fixes move to `madlabs/main-nixl` (`861208ba99`); Andrew's box is called a dev machine (owner, 2026-10-28) | `git show 861208ba99` |
+| 2026-11-02 | Andrew merges `madlabs/main-nixl` back (`843926b4ef`): one line for every box, configured per instance. With it, the tool-call fix from his live line (`caf95e5d69`) | "One engine line" below |
 
 ## What we carry
 
@@ -52,6 +57,9 @@ sgl-project/sglang on 2026-10-27.
 | Image preprocessing device | `413719a8b2`, `8bd82e73d3` (John Pezzulli) | `SGLANG_MM_PREPROCESS_DEVICE` (`environ.py:1501`) keeps image decoding off the GPU in the front-end process, which otherwise holds a second ~630 MiB on the card (engine doc:227) | none |
 | Prefill out-of-memory fix | `142800d641` (Qiaolin Yu); `8a18f5888f` (shi yang); `d2874d97af`, `01b10d5751`, `fe0d496131`, `3a12b433f9` (ours) | `f132f9b522` ran out of GPU memory under decision bursts with prefill CUDA graphs on (2026-10-20). Fix: the packed PLE convolution and freed per-bucket outputs, then hardening and bitwise, memory and fallback tests (CHANGELOG:26-28) | #44150 merged 2026-10-19 as `9ab74b8517`, after our base: drop `142800d641` at the next rebase. #43032 open |
 | API-key redaction | `922810a5ed` | `--api-key` and `--admin-api-key` were printed in the startup log, `/server_info` and the recorded launch command | issue #37457 open |
+| qwen3_coder strict tool grammar | `1252f79d86`, `16288005d1` (Andrew Stanton, from madlabs/systemone-prod), merged by `caf95e5d69` | under `SGLANG_TOOL_STRICT_LEVEL=2` the structural tag forced each schema's declared property order at every level, so fields the model wrote in its own order were dropped or trapped in strings (2026-11-01). Now XGrammar's `any_order`: undeclared keys are still rejected, but `required` is only a key count, so every call missing a required key is logged with a running tally | none; XGrammar's default is declared order |
+| NVMe PLE reader | `tools/ple_nvme/` (Garner McCloud's SSD Stream v0.2.0 via Pennyroyal), re-pinned to `ae7ec4de75` as `0.2.0+systemone4`; `edcaf4109c`, `84f483bceb` | streams the 47.68 GiB PLE table from local NVMe instead of pinning it in host RAM. A plugin, not engine code: inert unless an instance sets `PENNY_PLE_BACKEND=nvme` | none |
+| NIXL bounce-buffer fixes | `caeb776686` (port of `067c639c0a`), `d7d2358142` (port of `e1a1572743`) (John Pezzulli) | bound and align the NIXL tier's hybrid bounce transfers; used only with a NIXL disk tier | `caeb776686` is #36524, open |
 
 Pennyroyal is John Pezzulli's public RTX PRO 6000 build of Flash-Next
 (jpezzulli/sglang-rtxpro6000, tag `pennyroyal-v2.5.0`). Its fork branch
@@ -105,8 +113,8 @@ pinned the reader's guard to `madlabs/main@84f09ea980`, a commit of
 madlabs/main-next on upstream `f6fcda8827` that is not in this tree's history
 (`git merge-base --is-ancestor 84f09ea980 922810a5ed` fails). Nobody re-pinned
 the guard for `fe89a7c890` until 2026-10-27; at `922810a5ed`, 7 of the 11
-modules it guards differed (`tools/ple_nvme/REVIEW-2026-10-27.md` on
-`madlabs/main-nixl`). madlabs/main-next was deleted on 2026-10-28; tag
+modules it guards differed (`tools/ple_nvme/REVIEW-2026-10-27.md`).
+madlabs/main-next was deleted on 2026-10-28; tag
 `archive/main-next-jpeg` still holds its tip and `84f09ea980`. The
 body of `5a213706ea` also still describes the `f6fcda8827` rebase and a
 `+systemone2` deploy note. Published commits are not rewritten, so the
@@ -137,8 +145,8 @@ The GPU library stack is pinned in `python/pyproject.toml`: `torch==2.14.1`
 (:6, :89), `flashinfer_python[cu13]==0.7.2` (:42), `sglang-kernel==0.4.10`
 (:81).
 
-The NVMe PLE reader is not on this line: it lives on `madlabs/main-nixl`
-("Andrew's dev line" below).
+The NVMe PLE reader builds separately, only for a box that uses it
+(`tools/ple_nvme/install.sh`; "Per-instance settings" below).
 
 ## How it is qualified
 
@@ -166,24 +174,29 @@ fails them (CHANGELOG:40-43):
 
 What that qualification did not cover:
 
-- **Andrew's dev setup** (a NIXL disk tier and the NVMe PLE reader). It is not
-  production and not on this line; see "Andrew's dev line".
+- **Settings other than mad-llm-1's**: the NVMe PLE reader and a NIXL disk
+  tier, which Andrew's box runs. Their open items are in `madlabs/NIXL.md`.
 - **Most of the fork's CPU tests.** The unit-test gate ran a hand-picked list
   (`pod/madpod/qualify/box/unit-tests.trunkmove.txt`, 25 files). It has 14 of
   the 34 CPU-registered test files the fork adds or changes, and none of the
   four upstream CPU tests our changes had broken.
 - **The NIXL storage test file as a whole.** It crashed when its tests shared
-  one process; each test passed alone (CHANGELOG:43-44).
+  one process; each test passed alone (CHANGELOG:43-44). On Andrew's box three
+  fail alone as well (2026-11-02; `madlabs/NIXL.md`).
 
 ### CPU tests
 
 `.github/workflows/madlabs-cpu.yml` names the files and runs them on a hosted
 runner:
 
-- `cpu-unit` runs 38 files: the 34 CPU-registered files the fork adds or
+- `cpu-unit` runs 39 files: the 35 CPU-registered files the fork adds or
   changes, and the four upstream CPU tests our changes had broken
   (`test_parity`, `test_prefill_result_polling`,
   `test_scheduler_chunked_req_gate`, `test_server_args_docs_coverage`).
+- `ple-nvme` builds the NVMe PLE reader with its committed `Cargo.lock` and
+  runs its tests. Its source-guard tests fail when one of the 11 engine modules
+  the reader hooks changes without a re-pin (`tools/ple_nvme/README.md`,
+  "Source guard"): whoever changes such a module re-reviews the reader.
 
 GitHub Actions is turned off on this fork. Turning it on also arms upstream's
 workflow files that fire on any pull request, `pr-test.yml` among them (its
@@ -198,6 +211,11 @@ uv pip install -e "python[dev]" --index-strategy unsafe-best-match --prerelease 
 for f in $(sed -n '/CPU_TEST_FILES: |/,/^    steps:/p' .github/workflows/madlabs-cpu.yml | grep -o 'test/registered/[^ ]*\.py'); do
   python -m pytest -q -p no:cacheprovider "$f" || echo "FAILED $f"
 done
+# the reader, into a scratch directory
+PENNY_PLE_PLUGIN_DIR=/tmp/ple-nvme MATURIN_PEP517_ARGS=--locked PYTHON="$(command -v python)" \
+  bash tools/ple_nvme/install.sh
+PYTHONPATH=/tmp/ple-nvme:$PWD/python python -m pytest -q -p no:cacheprovider \
+  tools/ple_nvme/tests tools/ple_nvme/ssd_stream/tests
 ```
 
 ## Production engines
@@ -223,28 +241,67 @@ madlabs/main-next's tip), `archive/nixl-bounce-fixes`,
 `archive/systemone-ports` and `archive/trunk-ports`. The five other branches
 deleted that day had their tips on madlabs/main already.
 
-## One production engine
+## One engine line
 
 The rule: every production deployment runs the same engine line, so the
 deployments never drift apart (owner decision, 2026-10-04; engine doc:23-27).
 
-It is **met**: mad-llm-1 is the only production deployment, and it runs
-`922810a5ed` (tag `prod/2026-10-27`) from madlabs/main. Andrew's box is a dev
-machine, not a production deployment (owner, 2026-10-28): it is the only box
-that runs a NIXL disk tier and the NVMe PLE reader.
+Boxes differ in their machines, not in their engine line. mad-llm-1 runs
+`922810a5ed` (tag `prod/2026-10-27`) from madlabs/main. Andrew's box serves
+live traffic from `madlabs/systemone-prod` (`16288005d1`, whose changes this
+line carries) until it moves here, with the settings its machine calls for.
 
-## Andrew's dev line: `madlabs/main-nixl`
+From 2026-10-27 to 11-02 the NVMe PLE reader and the NIXL fixes lived on a
+separate branch, `madlabs/main-nixl`, and Andrew's box was called a dev
+machine (owner, 2026-10-28). On 2026-11-02 Andrew merged them back: a line
+split by machine type fits one kind of instance and not the next, while the
+reader and the NIXL tier are settings that each instance turns on or off.
 
-This line carries only what production serves. Andrew's dev-only pieces live
-on **`madlabs/main-nixl`** = madlabs/main + the NVMe PLE reader
-(`tools/ple_nvme/`, re-pinned to this tree as `0.2.0+systemone4`) + Pennyroyal's
-two NIXL bounce-buffer fixes. Only Andrew deploys it, and he qualifies it on
-his machine. Its open items are in `madlabs/NIXL.md` on that branch.
+## Per-instance settings
 
-It stays a superset of madlabs/main: whoever moves madlabs/main merges it into
-`madlabs/main-nixl` the same day, and Andrew may merge madlabs/main into it
-whenever he needs. A merge never touches the reader's files, because this line
-no longer has them.
+The engine is the same everywhere. These follow from the machine and are set
+per instance, never per branch:
+
+| Setting | What it decides | Depends on |
+|---|---|---|
+| `PENNY_PLE_BACKEND` | Where the 47.68 GiB PLE table lives. `ram` pins it in host RAM (`--ple-offload-embedding`); `nvme` streams the rows each token needs from a prepared overlay on local NVMe, through the reader (`SGLANG_PLUGINS=ssd_stream`) | host RAM; a local NVMe disk with ~52 GB free |
+| `HICACHE_SIZE` (`--hicache-size`, GB) | The host cache: its KV, Mamba and QSA shares | the RAM left after the table; it must exceed the device KV pool (the engine asserts it), so VRAM too |
+| NIXL disk tier | A third cache tier, on disk | a local NVMe mount several times the host cache |
+
+**Set the PLE backend for the machine; the engine does not choose it.** In
+RAM the table takes 47.68 GiB of pinned memory, which on a 100 GB box leaves
+no room for a host cache. On NVMe the page cache holds the hot rows and the
+kernel can reclaim them, but decode is somewhat slower and the box needs local
+NVMe: a network disk will not do. RAM is the better choice wherever it fits.
+Never serve an NVMe overlay without the reader active: SGLang would serve
+uninitialised PLE rows (`tools/ple_nvme/README.md`).
+
+`tools/instance_env.py` makes these choices from the machine. It reads RAM,
+VRAM and the filesystems of the candidate overlay and NIXL directories, and
+prints the settings for a launcher to eval (its docstring has the rules):
+
+```bash
+eval "$(python3 tools/instance_env.py --overlay /data/flash-next-ple --l3-dir /mnt/nixl-l3)"
+```
+
+A value already in the environment wins, and is checked. Its rules reproduce
+both boxes (`test/registered/unit/tools/test_instance_env.py`):
+
+| Box | RAM | Disk | `PENNY_PLE_BACKEND` | `HICACHE_SIZE` | NIXL tier |
+|---|---|---|---|---|---|
+| mad-llm-1 | 218 GB (preset `1gpu-24vcpu-218gb`) | network SSD only | `ram` | 75 | none |
+| Andrew's box | 100.3 GB | local NVMe | `nvme` | 50 | `/mnt/nixl-l3` |
+
+mad-llm-deploy's trunk launcher still accepts only `PENNY_PLE_BACKEND=ram`
+(`deploy/configs-trunk/serve-flash-next-madllm.sh`:99-100 at main
+`ca92cfe3f0`). A box that needs the reader needs that check made per instance
+too.
+
+### `madlabs/main-nixl`
+
+Retired 2026-11-02: madlabs/main carries everything it did. The ruleset
+forbids deleting it, so it is kept equal to madlabs/main by fast-forward.
+Build from madlabs/main.
 
 ## Credits
 
@@ -260,6 +317,6 @@ no longer has them.
   benchmarks), and the 2026-09-25 line this trunk grew from. He wrote 51 of
   the 84 commits in `fe89a7c890..922810a5ed`.
 - **Garner McCloud**: SSD Stream v0.2.0, which the NVMe reader adapts
-  (Apache-2.0; `tools/ple_nvme/ssd_stream/LICENSE` and `NOTICE` on `madlabs/main-nixl`).
+  (Apache-2.0; `tools/ple_nvme/ssd_stream/LICENSE` and `NOTICE`).
 - **Upstream authors** whose open or newer work we carry: Justin Huang
   (#39787), Qiaolin Yu (#44150), shi yang (#43032).

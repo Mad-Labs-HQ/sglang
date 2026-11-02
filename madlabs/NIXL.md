@@ -1,30 +1,28 @@
-# madlabs/main-nixl: Andrew's dev line
+# The NVMe PLE reader and the NIXL tier
 
-madlabs/main carries what production serves (mad-llm-1: PLE table in RAM, no
-NIXL tier). This branch is madlabs/main plus the pieces only Andrew's dev
-machine uses:
+madlabs/main carries both, for the boxes whose machines call for them
+(`madlabs/README.md`, "Per-instance settings"; `tools/instance_env.py`
+chooses):
 
 - **The NVMe PLE reader**, `tools/ple_nvme/` (`0.2.0+systemone4`, its source
-  guard pinned to madlabs/main's engine files), restored by `717d7f76e`
-  (a revert of `861208ba9`, which removed it from madlabs/main), with its CI
-  job and `.gitignore` lines.
+  guard pinned to madlabs/main's engine files), with its CI job and
+  `.gitignore` lines.
 - **Pennyroyal's two NIXL bounce-buffer fixes** by John Pezzulli: `caeb77668`
   (port of `067c639c0a`, the same patch as upstream #36524) and `d7d235814`
   (port of `e1a1572743`).
 
-Only Andrew deploys this branch, and he qualifies it on his machine. It is
-not production (owner, 2026-10-28).
+From 2026-10-27 to 11-02 they lived on `madlabs/main-nixl` (`861208ba9`
+removed the reader from madlabs/main, `717d7f76e` restored it there); on
+2026-11-02 Andrew merged that branch back into madlabs/main
+(`madlabs/README.md`, "One engine line").
 
-## Keeping it in sync
+## Changing a guarded module
 
-It stays a superset of madlabs/main. Whoever moves madlabs/main merges it into
-this branch the same day (`git merge origin/madlabs/main`, a merge commit, no
-rebase), and Andrew may do the same whenever he needs. A merge never touches
-the reader's files, because madlabs/main no longer has them. If a merge
-changes one of the 11 engine modules the reader guards,
-`python3 tools/ple_nvme/refresh_source_guard.py --check` fails: review the
-reader against the change, re-pin with `--source madlabs/main@<sha>`, and bump
-its `+systemone` version (`tools/ple_nvme/README.md`, "Source guard").
+If a change touches one of the 11 engine modules the reader guards,
+`python3 tools/ple_nvme/refresh_source_guard.py --check` and the `ple-nvme`
+CI job's guard tests fail: review the reader against the change, re-pin with
+`--source madlabs/main@<sha>`, and bump its `+systemone` version
+(`tools/ple_nvme/README.md`, "Source guard").
 
 ## Open items
 
@@ -72,21 +70,35 @@ its `+systemone` version (`tools/ple_nvme/README.md`, "Source guard").
    - mad-llm-deploy also has no launcher for this line in NVMe mode:
      `deploy/configs-trunk/serve-flash-next-madllm.sh:99-100` (main
      `ca92cfe3f0`) refuses anything but `PENNY_PLE_BACKEND=ram`.
-2. **Pennyroyal's two NIXL bounce-buffer fixes are carried here, not on
-   madlabs/main** (owner, 2026-10-28: NIXL runs only on Andrew's dev
-   machine). They are `caeb776686` (port of `067c639c0a`, "bound NIXL hybrid
+   - 2026-11-02: built with `MATURIN_PEP517_ARGS=--locked` on Andrew's box,
+     the reader's tests (`tools/ple_nvme/tests`, `ssd_stream/tests`) give 74
+     passed, source guard included. Still CPU only.
+2. **Pennyroyal's two NIXL bounce-buffer fixes** were kept off madlabs/main
+   from 2026-10-28 (owner: NIXL runs only on Andrew's machine) until the
+   2026-11-02 merge. They are `caeb776686` (port of `067c639c0a`, "bound NIXL hybrid
    bounce transfers", the same patch as upstream #36524, open) and
    `d7d2358142` (port of `e1a1572743`, "align mixed-state NIXL bounce I/O"),
    both authored by John Pezzulli. They were first committed as `72a1f20499`
    and `d42b47dfe2` on madlabs/nixl-bounce-fixes, which was deleted on
    2026-10-28; tag `archive/nixl-bounce-fixes` holds them.
-3. **Andrew qualifies this branch on his dev machine** when he can,
-   with the NIXL disk tier and the NVMe reader: item 1's GPU checks, and
+3. **Qualify the NIXL tier and the reader on Andrew's box** before it serves
+   this line with them: item 1's GPU checks, and
    `test/registered/unit/mem_cache/test_hicache_nixl_storage.py` whole, in one
    process. Its tests now close their NIXL agents at teardown; on a Linux CPU
    container with the NIXL 1.4.0 wheel, the live agents left after the file
    fell from 4 to 0. Whether that also ends the crash seen on the GPU box is
    not yet known.
+   - **2026-11-02, on Andrew's box** (NIXL 1.4.0 bindings, his locally built
+     NIXL libraries, `madlabs/systemone-prod`'s venv with torch 2.13): the
+     file whole gives 35 passed, 1 skipped, 3 failed, and the same 3 fail one
+     per process, on this merge and on `madlabs/main-nixl`'s tip
+     `0775718573` alike. `test_batch_set_get_v2_large_bounce_pool_round_trip`:
+     every DRAFT page is set but reads back False, with NIXL's POSIX backend
+     logging `path-mode open failed ... _draft: No such file or directory`.
+     `test_mla_mamba_round_trip_keeps_each_tp_rank`: both `zero_copy`
+     subtests. Andrew's box serves from `madlabs/systemone-prod`, which
+     carries neither fix, so these must pass before it runs this line with
+     the NIXL tier: it runs a draft model.
 4. **mad-llm-deploy has an NVMe-mode serve config on a parked branch,**
    `feat/trunk-nvme-ple`, for the day Andrew's box is declared there. Its
    RAM launch is byte-identical to mad-llm-1's. The tag

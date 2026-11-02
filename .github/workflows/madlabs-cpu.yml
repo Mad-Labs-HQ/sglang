@@ -32,7 +32,8 @@ jobs:
     timeout-minutes: 90
     env:
       # One file per line. 34 are the base-a-test-cpu files the fork adds or
-      # changes on fe89a7c890..922810a5ed; test_parity, test_prefill_result_polling,
+      # changes on fe89a7c890..922810a5ed, and test_instance_env came after;
+      # test_parity, test_prefill_result_polling,
       # test_scheduler_chunked_req_gate and test_server_args_docs_coverage are
       # the upstream tests the fork's changes broke.
       CPU_TEST_FILES: |
@@ -74,6 +75,7 @@ jobs:
         test/registered/unit/server_args/test_server_args.py
         test/registered/unit/server_args/test_server_args_docs_coverage.py
         test/registered/unit/spec/test_online_fp8_lm_head_sharing.py
+        test/registered/unit/tools/test_instance_env.py
     steps:
       - uses: actions/checkout@v4
 
