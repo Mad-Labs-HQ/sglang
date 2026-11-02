@@ -2922,6 +2922,68 @@ null
         )
 
 
+class TestRequiredKeyCheck(unittest.TestCase):
+    """FunctionCallParser logs tool calls that leave out a required key."""
+
+    LOGGER = "sglang.srt.function_call.function_call_parser"
+
+    def setUp(self):
+        widget = {
+            "type": "object",
+            "properties": {"type": {"type": "string"}, "color": {"type": "string"}},
+            "required": ["type"],
+        }
+        self.tools = [
+            Tool(
+                type="function",
+                function=Function(
+                    name="show",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "widgets": {"type": "array", "items": widget},
+                        },
+                        "required": ["widgets"],
+                    },
+                ),
+            )
+        ]
+
+    @staticmethod
+    def _call(*params):
+        body = "".join(f"<parameter={k}>\n{v}\n</parameter>\n" for k, v in params)
+        return f"<tool_call>\n<function=show>\n{body}</function>\n</tool_call>"
+
+    def _stream(self, text, chunk_size=7):
+        parser = FunctionCallParser(self.tools, "qwen3_coder")
+        for i in range(0, len(text), chunk_size):
+            parser.parse_stream_chunk(text[i : i + chunk_size])
+        parser.parse_stream_end()
+
+    def _parse(self, text):
+        FunctionCallParser(self.tools, "qwen3_coder").parse_non_stream(text)
+
+    def test_logs_missing_nested_required_key(self):
+        text = self._call(("title", "Steps"), ("widgets", '[{"color": "blue"}]'))
+        for name, run in (("non-stream", self._parse), ("stream", self._stream)):
+            with self.subTest(name), self.assertLogs(self.LOGGER, "WARNING") as logs:
+                run(text)
+            self.assertEqual(len(logs.output), 1)
+            self.assertIn("omits required widgets[0].type", logs.output[0])
+
+    def test_logs_missing_top_level_required_key(self):
+        with self.assertLogs(self.LOGGER, "WARNING") as logs:
+            self._stream(self._call(("title", "Steps")))
+        self.assertIn("omits required widgets;", logs.output[0])
+
+    def test_complete_call_logs_nothing(self):
+        text = self._call(("widgets", '[{"color": "blue", "type": "chart"}]'))
+        with self.assertNoLogs(self.LOGGER, "WARNING"):
+            self._parse(text)
+            self._stream(text)
+
+
 class TestGptOssDetector(unittest.TestCase):
     def setUp(self):
         self.tools = [
