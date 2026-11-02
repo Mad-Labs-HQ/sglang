@@ -43,6 +43,18 @@ _STRICT_JSON = json.JSONDecoder(
 
 
 class Qwen3CoderDetector(BaseFormatDetector):
+    # The model writes parameters and nested object properties in its own
+    # order, not the schema's. Under XGrammar's default declared-order grammar
+    # every property listed before one already written becomes unreachable:
+    # its value is silently dropped, the model gets trapped inside a string it
+    # can no longer close, or the call is forced shut and the parameter it
+    # wanted lands after </function> as stray markup. Measured 2026-11-01 under
+    # SGLANG_TOOL_STRICT_LEVEL=2: with an alphabetical widget schema, 6 of 6
+    # calls lost points/labels/style/color. any_order still rejects undeclared
+    # keys (so the `arguments` envelope stays out), but no longer enforces
+    # `required` or forbids a repeated key; on a repeat the later value wins.
+    structural_tag_any_order = True
+
     def __init__(self):
         super().__init__()
 
@@ -487,6 +499,48 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 else:
                     # Incomplete tag
                     break
+
+            # -------------------------------------------------------
+            # 2b. Markup after a call has closed
+            # -------------------------------------------------------
+            # Once </function> has sent a call's closing brace its arguments
+            # are final. A model whose call was cut short keeps "closing" in
+            # free text (`</parameter>\n</function>`), or writes the parameter
+            # it meant to include. Appending that parameter, or a second "}",
+            # to the finished arguments made them invalid JSON, and the stray
+            # </parameter> leaked into content. detect_and_parse only reads
+            # inside <tool_call>...</tool_call> and drops all of it, so drop it
+            # here too. Text before the first call is left alone.
+            if self.current_tool_id >= 0 and self.current_func_name is None:
+                if current_slice.startswith(self.parameter_prefix):
+                    rest = current_slice[len(self.parameter_prefix) :]
+                    ends = [
+                        (pos, len(tag) if tag == self.parameter_end_token else 0)
+                        for tag in (
+                            self.parameter_end_token,
+                            self.parameter_prefix,
+                            self.function_end_token,
+                            self.tool_call_start_token,
+                            self.tool_call_prefix,
+                        )
+                        if (pos := rest.find(tag)) != -1
+                    ]
+                    if not ends:
+                        break  # Wait for the orphan parameter to end
+                    pos, tag_len = min(ends)
+                    self.parsed_pos += len(self.parameter_prefix) + pos + tag_len
+                    continue
+                orphan = next(
+                    (
+                        tag
+                        for tag in (self.function_end_token, self.parameter_end_token)
+                        if current_slice.startswith(tag)
+                    ),
+                    None,
+                )
+                if orphan is not None:
+                    self.parsed_pos += len(orphan)
+                    continue
 
             # -------------------------------------------------------
             # 3. Parameter: <parameter=name>value...

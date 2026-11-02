@@ -2804,6 +2804,123 @@ null
         grammar = xgr.Grammar.from_structural_tag(structural_tag)
         self.assertIsInstance(grammar, xgr.Grammar)
 
+    def test_structural_tag_accepts_any_property_order(self):
+        """The strict grammar must not force the schema's property order.
+
+        With declared order, a property listed before one already written is
+        unreachable, so the model's value for it is silently lost.
+        """
+        from xgrammar.testing import _is_grammar_accept_string
+
+        strict_tools = [
+            tool.model_copy(
+                update={"function": tool.function.model_copy(update={"strict": True})}
+            )
+            for tool in self.tools
+        ]
+        grammar = xgr.Grammar.from_structural_tag(
+            self.detector.get_structural_tag(strict_tools, thinking_mode=False)
+        )
+
+        def call(name, *params):
+            body = "".join(
+                f"<parameter={key}>\n{value}\n</parameter>\n" for key, value in params
+            )
+            return f"<tool_call>\n<function={name}>\n{body}</function>\n</tool_call>"
+
+        # Top level: `days` is declared after `location`.
+        self.assertTrue(
+            _is_grammar_accept_string(
+                grammar,
+                call("get_current_weather", ("days", "3"), ("location", "Boston")),
+            )
+        )
+        # Nested: `status` is declared after `content`.
+        self.assertTrue(
+            _is_grammar_accept_string(
+                grammar,
+                call("TodoWrite", ("todos", '[{"status": "done", "content": "x"}]')),
+            )
+        )
+        # Undeclared keys stay out, at either level.
+        self.assertFalse(
+            _is_grammar_accept_string(
+                grammar,
+                call("get_current_weather", ("arguments", '{"location": "Boston"}')),
+            )
+        )
+        self.assertFalse(
+            _is_grammar_accept_string(
+                grammar,
+                call("TodoWrite", ("todos", '[{"content": "x", "owner": "me"}]')),
+            )
+        )
+
+    def _stream(self, text, chunk_size=7):
+        detector = Qwen3CoderDetector()
+        arguments, normal_text = {}, ""
+        for i in range(0, len(text), chunk_size):
+            result = detector.parse_streaming_increment(
+                text[i : i + chunk_size], self.tools
+            )
+            normal_text += result.normal_text
+            for call in result.calls:
+                arguments[call.tool_index] = arguments.get(call.tool_index, "") + (
+                    call.parameters or ""
+                )
+        return list(arguments.values()), normal_text
+
+    def test_streaming_drops_markup_after_closed_call(self):
+        """A call forced shut early, then 'closed' again and given the parameter
+        the model meant to include (seen 2026-11-01). The streamed arguments
+        used to become `{...}, "unit": "celsius"}`, invalid JSON."""
+        text = (
+            "<tool_call>\n<function=get_current_weather>\n"
+            "<parameter=location>\nBoston\n</parameter>\n</function>\n</tool_call>"
+            "\n\n</parameter>\n<parameter=unit>\ncelsius\n</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        arguments, normal_text = self._stream(text)
+        one_shot = self.detector.detect_and_parse(text, self.tools)
+
+        self.assertEqual(len(arguments), 1)
+        self.assertEqual(
+            json.loads(arguments[0]), json.loads(one_shot.calls[0].parameters)
+        )
+        self.assertNotIn("</parameter>", normal_text)
+
+    def test_streaming_orphan_function_end_adds_no_brace(self):
+        text = (
+            "<tool_call>\n<function=get_current_weather>\n"
+            "<parameter=location>\nBoston\n</parameter>\n</function>\n</tool_call>"
+            "\n</function>\n</tool_call>"
+        )
+        arguments, _ = self._stream(text)
+        self.assertEqual(json.loads(arguments[0]), {"location": "Boston"})
+
+    def test_streaming_markup_before_first_call_is_still_text(self):
+        prose = "Close each value with </parameter>.\n"
+        text = (
+            prose + "<tool_call>\n<function=get_current_weather>\n"
+            "<parameter=location>\nBoston\n</parameter>\n</function>\n</tool_call>"
+        )
+        arguments, normal_text = self._stream(text)
+        self.assertEqual(normal_text, prose)
+        self.assertEqual(json.loads(arguments[0]), {"location": "Boston"})
+
+    def test_streaming_second_call_after_closed_call(self):
+        text = (
+            "<tool_call>\n<function=get_current_weather>\n"
+            "<parameter=location>\nBoston\n</parameter>\n</function>\n</tool_call>\n"
+            "<tool_call>\n<function=get_current_weather>\n"
+            "<parameter=location>\nParis\n</parameter>\n</function>\n</tool_call>"
+        )
+        arguments, _ = self._stream(text)
+        self.assertEqual(
+            [json.loads(a) for a in arguments],
+            [{"location": "Boston"}, {"location": "Paris"}],
+        )
+
 
 class TestGptOssDetector(unittest.TestCase):
     def setUp(self):
